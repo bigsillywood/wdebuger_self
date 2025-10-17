@@ -276,3 +276,41 @@ NTSTATUS GETSSDT(PSSDT_SET ssdt_set) {
 	return st;
 }
 
+NTSTATUS GetCr3Offset(__out ULONG64 *offset) {
+	ULONG64 mcodeA;
+	NTSTATUS st = FindFunctionAddrByName(L"KeAttachProcess",&mcodeA);
+	if (!NT_SUCCESS(st)) {
+		return st;
+	}
+	ULONG count = 0;
+	UCHAR b1;
+	ULONG64 KiAttachProcessAddr = NULL;
+	while (SafeReadU8(mcodeA,&b1)&&b1!=0xCC) {
+		if (b1==0xE8) {
+			if (count==1)
+			{
+				ULONG32 offset1 = 0X00;
+				SafeReadI32((mcodeA+1),&offset1);
+				KiAttachProcessAddr = (mcodeA + 5) + offset1;
+				break;
+			}
+			count++;
+		}
+		mcodeA++;
+	}
+	UCHAR a1, a2, a3;
+	while (SafeReadU8(KiAttachProcessAddr,&a1)&&a1!=0xCC) {
+		if (SafeReadU8(KiAttachProcessAddr+1,&a2)&&SafeReadU8(KiAttachProcessAddr+2,&a3))
+		{
+			if (a1==0x48&&a2==0x8b&&a3==0x7e) {
+				UCHAR offset2;
+				SafeReadU8(KiAttachProcessAddr+3,&offset2);
+				(*offset) = (ULONG64)offset2;
+				return STATUS_SUCCESS;
+			}
+		}
+		KiAttachProcessAddr++;
+	}
+	return STATUS_INSUFFICIENT_RESOURCES;
+
+}

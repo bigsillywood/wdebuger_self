@@ -1,5 +1,6 @@
 #pragma once
 #include<ntifs.h>
+#include<intrin.h>
 #define PAGE_SIZE_BYTES 0x1000
 #define PAGE_ALIGN_DOWN(addr) ((PUCHAR)((ULONG_PTR)(addr) & ~(PAGE_SIZE_BYTES - 1)))
 #define COPY_TAG 'PgCp'
@@ -8,21 +9,35 @@
 #define OPEN_TARGET_PROCESS 0x804
 #define OPEN_TARGET_THREAD 0x805
 #define READ_PHYSICAL_MEM 0X802
-#define WRTIE_PHYSICAL_MEM 0X803
+#define WRITE_PHYSICAL_MEM 0X803
 
 
 #define IOCTL_CREATE_DEBUG_OBJ CTL_CODE(FILE_DEVICE_UNKNOWN,CREATE_DEBUG_OBJ,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_READ_PHYSICAL_MEM CTL_CODE(FILE_DEVICE_UNKNOWN,READ_PHYSICAL_MEM,METHOD_BUFFERED,FILE_ANY_ACCESS)
-#define IOCTL_WRTIE_PHYSICAL_MEM CTL_CODE(FILE_DEVICE_UNKNOWN,WRTIE_PHYSICAL_MEM,METHOD_BUFFERED,FILE_ANY_ACCESS)
+#define IOCTL_WRITE_PHYSICAL_MEM CTL_CODE(FILE_DEVICE_UNKNOWN,WRITE_PHYSICAL_MEM,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_CREATE_TARGET_PROCESS CTL_CODE(FILE_DEVICE_UNKNOWN,OPEN_TARGET_PROCESS,METHOD_BUFFERED,FILE_ANY_ACCESS);
 #define IOCTL_CREATE_TARGET_PROCESS CTL_CODE(FILE_DEVICE_UNKNOWN,OPEN_TARGET_THREAD,METHOD_BUFFERED,FILE_ANY_ACCESS);
 
 
 // 64-bit driver code
+/*
+	Comm.c struct
+*/
 struct CREATE_DEBUG_OBJ_ARG {
 	__in HANDLE DebugerPid;
 	__in HANDLE TargetPid;
 };
+
+struct READ_PHY_ARG {
+	__in HANDLE TargetPid;
+	__in PVOID TargetVirtualAddr;
+	__out UCHAR* ReadBufferPtr;
+	__in size_t read_size;
+};
+
+
+
+
 
 
 typedef NTSTATUS(NTAPI* PFN_ZwCreateDebugObject)(
@@ -104,8 +119,8 @@ NTSYSCALLAPI
 PVOID
 NTAPI
 PsGetProcessSectionBaseAddress(PEPROCESS eprocess);
-
-
+NTSTATUS ReadTargetPhysicalMemory(__in HANDLE TargetPid, __in PVOID VirtualAddress, __in SIZE_T readlen, __out UCHAR* outputbuffer, size_t* actual_size);
+NTSTATUS WriteTargetPhysicalMemory(__in HANDLE TargetPid, __in PVOID VirtualAddress, __in SIZE_T writelen, __in UCHAR* inputbuffer);
 /*
 SSDTfinder.c
 */
@@ -113,6 +128,7 @@ NTSTATUS GETSSDT(PSSDT_SET ssdt_set);
 NTSTATUS  GETSERVICEFUNCTIONADDR(__in ULONG eaxt, __out PVOID* addr, __in int ssdttype);
 NTSTATUS FindFunctionAddrByName(__in WCHAR* name, __out PVOID* addr);
 NTSTATUS ChangePreviousMode(KPROCESSOR_MODE mode);
+NTSTATUS GetCr3Offset(__out ULONG64* offset);
 /*
 kdbg.c
 */
