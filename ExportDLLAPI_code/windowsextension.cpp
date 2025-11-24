@@ -1,8 +1,9 @@
 #include"WdbgDll.hpp"
 //this will not set up the TEB reserve , make user can track it by them self
 BOOL WaitForDebugEventWorkerSelf(DEBUG_EVENT* PDebugEvent, INT waitmiliseconds, BOOL extendflag);
+
 BOOL WaitForDebugEventSelf(DEBUG_EVENT* PDebugEvent, INT waitmiliseconds) {
-	return WaitForDebugEventWorkerSelf(PDebugEvent,waitmiliseconds,0);
+	return WaitForDebugEventWorkerSelf(PDebugEvent,waitmiliseconds,1);
 }
 BOOL WaitForDebugEventWorkerSelf(DEBUG_EVENT* PDebugEvent,INT waitmiliseconds,BOOL extendflag) {
 	LARGE_INTEGER timeout;

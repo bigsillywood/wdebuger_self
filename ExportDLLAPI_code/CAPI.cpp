@@ -114,7 +114,7 @@ HANDLE UserOpenThread(__in HANDLE TargetPid,__in HANDLE TargetTid,__in HANDLE hD
     struct OPEN_THREAD_ARG args;
     args.Pid = TargetPid;
     args.Tid = TargetTid;
-    HANDLE out_handle = INVALID_HANDLE_VALUE;
+    HANDLE out_handle = NULL;
     ULONG readlen = 0;
     BOOL ok = DeviceIoControl(hDevice,
         IOCTL_OPEN_TARGET_THREAD,
@@ -124,6 +124,7 @@ HANDLE UserOpenThread(__in HANDLE TargetPid,__in HANDLE TargetTid,__in HANDLE hD
         sizeof(HANDLE),
         &readlen,
         NULL);
+
     return out_handle;
 }
 
@@ -155,6 +156,30 @@ WDBGDLL_API BOOL RemoveHandles(PVOID dbgreserve_0, int threadid, int processid)
 
     return TRUE;
 }
+
+BOOL ContinueThreadC(HANDLE dbghandle,HANDLE ProcessId, HANDLE ThreadId)
+{
+    CLIENT_ID cid = { 0 };
+    cid.UniqueProcess = ProcessId;
+    cid.UniqueThread = ThreadId;
+    NTSTATUS status = NtDebugContinue(dbghandle, &cid, DBG_CONTINUE);
+    if (status<0)
+    {
+        return FALSE;
+    }
+    else {
+        return TRUE;
+    }
+}
+
+void OutputErrorCode(DWORD errcode)
+{
+    char buf[100];
+    sprintf_s(buf, sizeof(buf),
+        "lasterror code:%d\n", errcode);
+    OutputDebugStringA(buf);
+}
+
 
 
 

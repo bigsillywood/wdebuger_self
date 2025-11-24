@@ -14,6 +14,12 @@ typedef struct _DBGSS_EVENT_ENTRY {
     PVOID  StateChangeBuffer;           // Raw DBGUI state-change pointer
 } DBGSS_EVENT_ENTRY, * PDBGSS_EVENT_ENTRY;
 
+
+typedef struct _CLIENT_ID {
+    HANDLE UniqueProcess;
+    HANDLE UniqueThread;
+}CLIENT_ID, * PCLIENT_ID;
+
 extern "C" NTSTATUS NtDebugContinue(
     HANDLE DebugObject,
     void* ClientId,
@@ -21,7 +27,7 @@ extern "C" NTSTATUS NtDebugContinue(
 );
 extern "C" NTSTATUS ZwRemoveProcessDebug(
     HANDLE ProcessHandle,
-    HANDLE Handle
+    HANDLE DBGHandle
 );
 extern "C" NTSTATUS NTAPI
 DbgUiWaitStateChange(

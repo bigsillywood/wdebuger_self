@@ -54,11 +54,6 @@ struct OPEN_THREAD_ARG {
 };	
 
 
-typedef struct _CLIENT_ID {
-	HANDLE UniqueProcess;
-	HANDLE UniqueThread;
-}CLIENT_ID, * PCLIENT_ID;
-
 typedef struct _ThreadInfo {
 	HANDLE Tid;
 
@@ -73,26 +68,36 @@ typedef struct _ThreadInfo {
 	CONTEXT ThreadContext;
 }ThreadInfo,*PThreadInfo;
 
-
+typedef struct _DLLRecordNode {
+	_DLLRecordNode* next;
+	HANDLE LoadingThread;
+	LOAD_DLL_DEBUG_INFO dllinfo;
+}DLLRecordNode,*PDLLRecordNode;
 
 class WDBGDLL_API WDebugerObject {
 private:
 	//PDBGSS_EVENT_ENTRY reserve;
+	PDLLRecordNode dllhead;
 	HANDLE hDevice;
 	HANDLE DebugHandle;
 	HANDLE TargetPid;
 	HANDLE ProcessHandle;
+	HANDLE MainThreadid;
 	CREATE_PROCESS_DEBUG_INFO ProcessInfo;
 	std::map <HANDLE , ThreadInfo*> ThreadInfoMaps;
 	BOOL init();
 	CRITICAL_SECTION ThreadMapLock;
 	BOOL islisten;
 	BOOL CombineThread();
-	PDBGSS_EVENT_ENTRY ReservedHandleList;
+	//PDBGSS_EVENT_ENTRY ReservedHandleList;
 	VOID ADDTHREAD(DEBUG_EVENT* CreateThreadEvent);
 	VOID ADDPROCESS(DEBUG_EVENT* CreateProcessEvent);
 	VOID DELETETHREAD(HANDLE Tid);
-	VOID DELETEPROCESS();
+	VOID DELETEPROCESS(HANDLE MainTid);
+	VOID LOADDLL(DEBUG_EVENT* LoadDllEvent);
+	VOID UNLOADDLL(DEBUG_EVENT* UnloadDllEvent);
+	VOID EXCEPTIONRECORD(DEBUG_EVENT* ExceptionEvent);
+	VOID CLEANALLDLL();
 	VOID ListenThread();
 	std::thread listen_thread;
 public:
@@ -102,7 +107,9 @@ public:
 	BOOL GetThreadList(HANDLE *Tidbuffer,DWORD buffersize);
 	BOOL ContinueThread(HANDLE Tid);
 	BOOL GetThreadInfo(HANDLE Tid,ThreadInfo *outinfo);
-	BOOL GetProcessInfo(CREATE_PROCESS_DEBUG_INFO *outinfo);
+	BOOL EnumDllInfo(PDLLRecordNode* head);
+	
+	VOID GetProcessInfo(CREATE_PROCESS_DEBUG_INFO *outinfo);
 	BOOL ChangeContext(HANDLE Tid,CONTEXT* tcontext);
 	BOOL CreateListenThread();
 	HANDLE GetDebugProcessHandle();
@@ -131,3 +138,5 @@ extern "C" WDBGDLL_API BOOL UserPhysicalWrite(__in HANDLE TargetPID,
 extern "C" WDBGDLL_API HANDLE UserOpenProcess(__in HANDLE TargetPid, __in HANDLE hDevice);
 extern "C" WDBGDLL_API HANDLE UserOpenThread(__in HANDLE TargetPid,__in HANDLE TargetTid,__in HANDLE hDevice);
 extern "C" WDBGDLL_API BOOL RemoveHandles(PVOID dbgreserve_0, int threadid, int processid);
+extern "C" WDBGDLL_API BOOL ContinueThreadC(HANDLE dbghandle,HANDLE ProcessId,HANDLE ThreadId);
+void OutputErrorCode(DWORD errcode);
