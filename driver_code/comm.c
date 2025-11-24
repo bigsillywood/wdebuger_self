@@ -19,7 +19,7 @@ NTSTATUS UserCreateDebugObject(PDEVICE_OBJECT device_ptr, PIRP irp_ptr, PIO_STAC
 	}
 	else
 	{
-		(HANDLE)(irp_ptr->AssociatedIrp.SystemBuffer) = -1;
+		*((HANDLE*)(irp_ptr->AssociatedIrp.SystemBuffer)) = NULL;
 	}
 	return status;
 }
@@ -108,13 +108,14 @@ NTSTATUS UserOpenProcess(PDEVICE_OBJECT device_ptr, PIRP irp_ptr, PIO_STACK_LOCA
 	}
 	else
 	{
-		(HANDLE)(irp_ptr->AssociatedIrp.SystemBuffer) = -1;
+		*((HANDLE*)(irp_ptr->AssociatedIrp.SystemBuffer)) = NULL;
 	}
 	return status;
 }
 
 NTSTATUS UserOpenThread(PDEVICE_OBJECT device_ptr, PIRP irp_ptr, PIO_STACK_LOCATION stack)
 {
+	//DbgBreakPoint();
 	NTSTATUS status = STATUS_SUCCESS;
 	if (stack->Parameters.DeviceIoControl.InputBufferLength != sizeof(struct OPEN_THREAD_ARG) ||
 		stack->Parameters.DeviceIoControl.OutputBufferLength != sizeof(HANDLE)) {
@@ -123,7 +124,7 @@ NTSTATUS UserOpenThread(PDEVICE_OBJECT device_ptr, PIRP irp_ptr, PIO_STACK_LOCAT
 	HANDLE outhandle = NULL;
 	struct OPEN_THREAD_ARG* bufferarg = (struct OPEN_THREAD_ARG*)irp_ptr->AssociatedIrp.SystemBuffer;
 	CLIENT_ID cid;
-	cid.UniqueProcess = bufferarg->Tid;
+	cid.UniqueProcess = bufferarg->Pid;
 	cid.UniqueThread = bufferarg->Tid;
 	status = KrnlOpenThread(&cid,&outhandle);
 	irp_ptr->IoStatus.Information = sizeof(HANDLE);
@@ -132,7 +133,7 @@ NTSTATUS UserOpenThread(PDEVICE_OBJECT device_ptr, PIRP irp_ptr, PIO_STACK_LOCAT
 	}
 	else
 	{
-		(HANDLE)(irp_ptr->AssociatedIrp.SystemBuffer) = -1;
+		*((HANDLE*)(irp_ptr->AssociatedIrp.SystemBuffer)) = NULL;
 	}
 	return status;
 }

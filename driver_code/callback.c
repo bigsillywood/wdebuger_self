@@ -18,7 +18,7 @@ NTSTATUS MJ_DEVICECLEAN(PDEVICE_OBJECT device_ptr, PIRP irp_ptr) {
 	return STATUS_SUCCESS;
 }
 NTSTATUS IOCTL_FUNC(PDEVICE_OBJECT device_ptr, PIRP irp_ptr) {
-	DbgBreakPoint();
+	//DbgBreakPoint();
 	NTSTATUS status = STATUS_SUCCESS;
 	PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(irp_ptr);
 	ULONG code = stack->Parameters.DeviceIoControl.IoControlCode;
@@ -28,6 +28,10 @@ NTSTATUS IOCTL_FUNC(PDEVICE_OBJECT device_ptr, PIRP irp_ptr) {
 	case IOCTL_OPEN_TARGET_PROCESS: {
 		status = UserOpenProcess(device_ptr,irp_ptr,stack);
 		break;
+	}
+	case IOCTL_OPEN_TARGET_THREAD: {
+		status = UserOpenThread(device_ptr,irp_ptr,stack);
+		break;	
 	}
 	case IOCTL_CREATE_DEBUG_OBJ: {
 

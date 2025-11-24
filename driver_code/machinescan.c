@@ -109,8 +109,7 @@ NTSTATUS GETSSDT(PSSDT_SET ssdt_set) {
 		return st;
 	}
 
-
-
+	
 	/*
 	while ((*mcodestart) != 0xc3) {
 

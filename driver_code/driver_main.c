@@ -16,7 +16,7 @@ void unload(PDRIVER_OBJECT selfptr) {
 
 NTSTATUS GsDriverEntry(PDRIVER_OBJECT selfptr, PUNICODE_STRING reg_path) {
 	UNREFERENCED_PARAMETER(reg_path);
-	DbgBreakPoint();
+	//DbgBreakPoint();
 	//dbg_handle = NULL;
 	selfptr->DriverUnload = unload;
 	NTSTATUS status = STATUS_SUCCESS;;
