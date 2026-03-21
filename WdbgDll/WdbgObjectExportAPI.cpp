@@ -11,7 +11,7 @@ WDebugerObject::WDebugerObject(HANDLE TargetPid)
 	this->TargetPid = TargetPid;
 	this->hDevice = NULL;
 	this->DebugHandle = NULL;
-	this->CodeStruct.CodeLockOk = FALSE;
+	//this->CodeStruct.CodeLockOk = FALSE;
 	this->isLockOk = FALSE;
 	this->CodeStruct.CurrentLookingPageStartAddress = NULL;
 	RtlZeroMemory(&(this->ProcessInfo),sizeof(CREATE_PROCESS_DEBUG_INFO));
@@ -68,13 +68,17 @@ WDebugerObject::~WDebugerObject()
 	}
 	this->CLEANALLDLL();
 	if (this->isLockOk) {
-		DeleteCriticalSection(&(this->ThreadMapLock));
+		DeleteCriticalSection(&(this->WdbgLock));
 	}
 	this->isLockOk = FALSE;
-	if (this->CodeStruct.CodeLockOk) {
+	/*
+		if (this->CodeStruct.CodeLockOk) {
 		DeleteCriticalSection(&(this->CodeStruct.CodeLock));
 	}
-	this->CodeStruct.CodeLockOk = FALSE;
+	
+	*/
+
+	//this->CodeStruct.CodeLockOk = FALSE;
 }
 
 
@@ -92,7 +96,7 @@ BOOL WDebugerObject::GetThreadList(HANDLE* Tidbuffer, DWORD buffersize)
 	DWORD MaxIndex = buffersize - 1;
 	DWORD index = 0;
 	BOOL result = TRUE;
-	EnterCriticalSection(&(this->ThreadMapLock));
+	EnterCriticalSection(&(this->WdbgLock));
 	for (auto it = this->ThreadInfoMaps.begin(); it != this->ThreadInfoMaps.end();it++) {
 		if (index>MaxIndex)
 		{
@@ -102,32 +106,41 @@ BOOL WDebugerObject::GetThreadList(HANDLE* Tidbuffer, DWORD buffersize)
 		Tidbuffer[index] = it->first;
 		index++;
 	}
-	LeaveCriticalSection(&(this->ThreadMapLock));
+	LeaveCriticalSection(&(this->WdbgLock));
 	return result;
 }
+
 
 BOOL WDebugerObject::ContinueThread(HANDLE Tid)
 {
 	
-	BOOL result;
-	EnterCriticalSection(&(this->ThreadMapLock));
-	auto it = this->ThreadInfoMaps.find(Tid);
-	if (it==this->ThreadInfoMaps.end() ||it->second->devent.dwDebugEventCode==0) {
-		LeaveCriticalSection(&(this->ThreadMapLock));
+	EnterCriticalSection(&this->WdbgLock);
+	auto iter = this->ThreadInfoMaps.find(Tid);
+	if (iter==this->ThreadInfoMaps.end())
+	{
+		LeaveCriticalSection(&this->WdbgLock);
 		return FALSE;
 	}
-	result = ContinueThreadC(this->DebugHandle,this->TargetPid,Tid);
-	if(result){	
-		RtlZeroMemory(&(ThreadInfoMaps[Tid]->devent),sizeof(DEBUG_EVENT));
+	iter->second->stepflag = StepReasonNone;
+	POneInstructionRecord bptr;
+	for (auto it = this->CodeStruct.Blist.begin(); it != this->CodeStruct.Blist.end(); it++)
+	{
+		bptr = it->second;
+		if (bptr->enable == TRUE && bptr->dirty == TRUE)
+		{
+			WritePhysicalMem(BreakPointerBuffer, bptr->InstructionLen, bptr->InstructionAddr);
+			FlushInstructionCache(this->ProcessHandle, (LPCVOID)bptr->InstructionLen, bptr->InstructionAddr);
+			bptr->dirty = FALSE;
+		}
 	}
-	LeaveCriticalSection(&(this->ThreadMapLock));
-	return result;
+	BOOL ok = this->ContinueThreadLocked(Tid);
+	LeaveCriticalSection(&this->WdbgLock);
+	return ok;
 }
-
 BOOL WDebugerObject::SetCodeStructCurrentLookingInstructions(DWORD64 VirtualAddress)
 {
 	PageInfor* SavedCurrentPagePtr = NULL;
-	EnterCriticalSection(&this->CodeStruct.CodeLock);
+	EnterCriticalSection(&this->WdbgLock);
 	auto itSaved = this->CodeStruct.Pagelist.find(
 		this->CodeStruct.CurrentLookingPageStartAddress
 	);
@@ -135,12 +148,12 @@ BOOL WDebugerObject::SetCodeStructCurrentLookingInstructions(DWORD64 VirtualAddr
 		SavedCurrentPagePtr = itSaved->second;
 		if (SavedCurrentPagePtr==NULL)
 		{
-			LeaveCriticalSection(&(this->CodeStruct.CodeLock));
+			LeaveCriticalSection(&(this->WdbgLock));
 			OutputDebugStringW(L"illegal second,ouccr in SetCodeStructCurrentLookingInstructions");
 			return FALSE;
 		}
 		if (SavedCurrentPagePtr->CurrentVirtualAddress==VirtualAddress) {
-			LeaveCriticalSection(&(this->CodeStruct.CodeLock));
+			LeaveCriticalSection(&(this->WdbgLock));
 			return TRUE;
 		}
 	
@@ -150,18 +163,18 @@ BOOL WDebugerObject::SetCodeStructCurrentLookingInstructions(DWORD64 VirtualAddr
 	auto it = this->CodeStruct.Pagelist.find(PageStartAddress);
 	if (it == this->CodeStruct.Pagelist.end() || it->second == NULL) {
 		if(!this->CahchePage(PageStartAddress)) {
-			LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			LeaveCriticalSection(&this->WdbgLock);
 			return FALSE;
 		}
 		auto temp = this->CodeStruct.Pagelist.find(PageStartAddress);
 		if (temp==this->CodeStruct.Pagelist.end()) {
-			LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			LeaveCriticalSection(&this->WdbgLock);
 			return FALSE;
 		}
 
 		PageInfor* NewPageInfor = temp->second;
 		if (NewPageInfor==NULL) {
-			LeaveCriticalSection(&(this->CodeStruct.CodeLock));
+			LeaveCriticalSection(&(this->WdbgLock));
 			OutputDebugStringW(L"illegal second,ouccr in SetCodeStructCurrentLookingInstructions");
 			return FALSE;
 		}
@@ -176,7 +189,7 @@ BOOL WDebugerObject::SetCodeStructCurrentLookingInstructions(DWORD64 VirtualAddr
 		}
 		this->CodeStruct.Pagelist.erase(NewPageInfor->StartVirtualAddr);
 		this->FreePage(NewPageInfor);	
-		LeaveCriticalSection(&this->CodeStruct.CodeLock);
+		LeaveCriticalSection(&this->WdbgLock);
 		return FALSE;
 	}
 	else
@@ -191,7 +204,7 @@ BOOL WDebugerObject::SetCodeStructCurrentLookingInstructions(DWORD64 VirtualAddr
 				goto SUCCESS;
 			}
 		}
-		LeaveCriticalSection(&this->CodeStruct.CodeLock);
+		LeaveCriticalSection(&this->WdbgLock);
 		return FALSE;
 	}
 
@@ -202,7 +215,7 @@ SUCCESS:
 			this->FreePage(SavedCurrentPagePtr);
 		}
 	}
-	LeaveCriticalSection(&this->CodeStruct.CodeLock);
+	LeaveCriticalSection(&this->WdbgLock);
 	return TRUE;
 }
 
@@ -218,17 +231,17 @@ DWORD64 WDebugerObject::GetTargetCode(POneInstructionRecord InstructionRecordBuf
 	SIZE_T index = 0;
 	
 	OutputDebugStringW(L"get tempageptr map");
-	EnterCriticalSection(&this->CodeStruct.CodeLock);
+	EnterCriticalSection(&this->WdbgLock);
 	auto it = this->CodeStruct.Pagelist.find(this->CodeStruct.CurrentLookingPageStartAddress);
 	if (it==this->CodeStruct.Pagelist.end())
 	{
 		
-		LeaveCriticalSection(&this->CodeStruct.CodeLock);
+		LeaveCriticalSection(&this->WdbgLock);
 		return 0;
 	}
 	if (it->second==NULL) {
 		OutputDebugStringW(L"illegal second,ouccr in GetTargetCode");
-		LeaveCriticalSection(&this->CodeStruct.CodeLock);
+		LeaveCriticalSection(&this->WdbgLock);
 		return 0;
 	}
 	PageInfor* TemPagePtr =it->second;
@@ -260,7 +273,7 @@ DWORD64 WDebugerObject::GetTargetCode(POneInstructionRecord InstructionRecordBuf
 		}
 		index++;
 	}
-	LeaveCriticalSection(&this->CodeStruct.CodeLock);
+	LeaveCriticalSection(&this->WdbgLock);
 	return index;
 }
 
@@ -268,18 +281,15 @@ BOOL WDebugerObject::SetBreakPointUp(DWORD64 InstructionAddr)
 {
 	PageInfor* TargetPage = NULL;
 	DWORD64 StartAddress = InstructionAddr & (~0xfff);
-	EnterCriticalSection(&this->CodeStruct.CodeLock);
+	EnterCriticalSection(&this->WdbgLock);
 	auto Saved = this->CodeStruct.Pagelist.find(StartAddress);
 	if (Saved==this->CodeStruct.Pagelist.end()||Saved->second==NULL)
 	{
 		if (!this->CahchePage(StartAddress)) {
-			LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			LeaveCriticalSection(&this->WdbgLock);
 			return FALSE;
 		}
 	}
-	UCHAR WriteBuffer[24];
-	memset(WriteBuffer,0x90,24);
-	WriteBuffer[0] = 0xCC;
 	auto finder = this->CodeStruct.Blist.find(InstructionAddr);
 	if (finder!=this->CodeStruct.Blist.end())
 	{
@@ -288,19 +298,21 @@ BOOL WDebugerObject::SetBreakPointUp(DWORD64 InstructionAddr)
 		if (InsPtr!=NULL)
 		{
 			if (InsPtr->enable==FALSE){
-				if (this->WritePhysicalMem(WriteBuffer, InsPtr->InstructionLen, InstructionAddr)) {
+				if (this->WritePhysicalMem(BreakPointerBuffer, InsPtr->InstructionLen, InstructionAddr)) {
+					FlushInstructionCache(this->ProcessHandle, (LPCVOID)InsPtr->InstructionLen, InsPtr->InstructionAddr);
 					InsPtr->enable = TRUE;
-					LeaveCriticalSection(&this->CodeStruct.CodeLock);
+					InsPtr->dirty = FALSE;
+					LeaveCriticalSection(&this->WdbgLock);
 					return TRUE;
 				}
 				else
 				{
-					LeaveCriticalSection(&this->CodeStruct.CodeLock);
+					LeaveCriticalSection(&this->WdbgLock);
 					return FALSE;
 				}
 			}
 			else {
-				LeaveCriticalSection(&this->CodeStruct.CodeLock);
+				LeaveCriticalSection(&this->WdbgLock);
 				return TRUE;
 			}
 		}
@@ -320,7 +332,7 @@ BOOL WDebugerObject::SetBreakPointUp(DWORD64 InstructionAddr)
 			
 			if (InstructionPtr==NULL)
 			{
-				LeaveCriticalSection(&this->CodeStruct.CodeLock);
+				LeaveCriticalSection(&this->WdbgLock);
 				return FALSE;
 			}
 			ZeroMemory(InstructionPtr, sizeof(OneInstructionRecord));
@@ -336,64 +348,93 @@ BOOL WDebugerObject::SetBreakPointUp(DWORD64 InstructionAddr)
 				tempPtr->mnemonic,
 				tempPtr->op_str
 			);
-			if(this->WritePhysicalMem(WriteBuffer,InstructionPtr->InstructionLen,InstructionAddr)){
+			if(this->WritePhysicalMem(BreakPointerBuffer,InstructionPtr->InstructionLen,InstructionAddr)){
+				FlushInstructionCache(this->ProcessHandle,(LPCVOID)InstructionPtr->InstructionLen,InstructionPtr->InstructionAddr);
 				InstructionPtr->enable = TRUE;
+				InstructionPtr->dirty = FALSE;
 				this->CodeStruct.Blist[InstructionAddr] = InstructionPtr;
 				this->CodeStruct.Pagelist[StartAddress]->BreakPointCounts++;
-				LeaveCriticalSection(&this->CodeStruct.CodeLock);
+
+				LeaveCriticalSection(&this->WdbgLock);
 				return TRUE;
 			}
 			else
 			{
 				free(InstructionPtr);
-				LeaveCriticalSection(&this->CodeStruct.CodeLock);
+				LeaveCriticalSection(&this->WdbgLock);
 				return FALSE;
 			}
 
 		}
 	}
-	LeaveCriticalSection(&this->CodeStruct.CodeLock);
+	LeaveCriticalSection(&this->WdbgLock);
 }
 
 BOOL WDebugerObject::SetBreakPointDown(DWORD64 InstructionAddr)
 {
-	EnterCriticalSection(&this->CodeStruct.CodeLock);
+	//EnterCriticalSection(&this->ThreadMapLock);
+	EnterCriticalSection(&this->WdbgLock);
 	auto it = this->CodeStruct.Blist.find(InstructionAddr);
 	if (it==this->CodeStruct.Blist.end()) {
-		LeaveCriticalSection(&this->CodeStruct.CodeLock);
-		return TRUE;
+		//LeaveCriticalSection(&this->CodeStruct.CodeLock);
+		LeaveCriticalSection(&this->WdbgLock);
+		return FALSE;
 	}
 	else
 	{
+		
 		POneInstructionRecord ptr = it->second;
 		if (ptr==NULL) {
 			this->CodeStruct.Blist.erase(InstructionAddr);
-			LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			//LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			LeaveCriticalSection(&this->WdbgLock);
 			return TRUE;
 		}
+
+		for (auto iter2 = this->ThreadInfoMaps.begin(); iter2 != this->ThreadInfoMaps.end(); iter2++)
+		{
+			if (iter2->second->devent.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
+				&& iter2->second->devent.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT
+				&& (DWORD64)iter2->second->devent.u.Exception.ExceptionRecord.ExceptionAddress == InstructionAddr
+				&& it->second->enable == TRUE) {
+				DWORD oflag = iter2->second->ThreadContext.ContextFlags;
+				iter2->second->ThreadContext.ContextFlags = CONTEXT_CONTROL;
+				GetThreadContext(iter2->second->ThreadHandle, &iter2->second->ThreadContext);
+				iter2->second->ThreadContext.Rip = iter2->second->ThreadContext.Rip - 1;
+				SetThreadContext(iter2->second->ThreadHandle, &iter2->second->ThreadContext);
+				iter2->second->ThreadContext.ContextFlags = oflag;
+			}
+		}
 		if (this->WritePhysicalMem(ptr->InstructionBuffer,ptr->InstructionLen,ptr->InstructionAddr)) {
+			FlushInstructionCache(this->ProcessHandle,(LPCVOID)ptr->InstructionAddr,ptr->InstructionLen);
 			ptr->enable = FALSE;
-			LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			ptr->dirty = FALSE;
+			//LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			LeaveCriticalSection(&this->WdbgLock);
 			return TRUE;
 		}
 		else
 		{
-			LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			//LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			LeaveCriticalSection(&this->WdbgLock);
 			return FALSE;
 		}
 
 	}
-	LeaveCriticalSection(&this->CodeStruct.CodeLock);
+	//LeaveCriticalSection(&this->CodeStruct.CodeLock);
+	LeaveCriticalSection(&this->WdbgLock);
 	return 0;
 }
 
 BOOL WDebugerObject::DeleteBreakPoint(DWORD64 InstructionAddr)
 {
 	DWORD64 StartAddr=InstructionAddr&(~0xfff);
-	EnterCriticalSection(&this->CodeStruct.CodeLock);
+	//EnterCriticalSection(&this->ThreadMapLock);
+	EnterCriticalSection(&this->WdbgLock);
 	auto it=this->CodeStruct.Blist.find(InstructionAddr);
 	if (it==this->CodeStruct.Blist.end()) {
-		LeaveCriticalSection(&this->CodeStruct.CodeLock);
+		LeaveCriticalSection(&this->WdbgLock);
+		//LeaveCriticalSection(&this->ThreadMapLock);
 		return TRUE;
 	}
 	else
@@ -401,12 +442,40 @@ BOOL WDebugerObject::DeleteBreakPoint(DWORD64 InstructionAddr)
 		POneInstructionRecord Ptr = it->second;
 		if(Ptr==NULL){
 			this->CodeStruct.Blist.erase(InstructionAddr);
-			LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			//LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			LeaveCriticalSection(&this->WdbgLock);
 			return TRUE;
+		}
+		for (auto iter2 = this->ThreadInfoMaps.begin(); iter2 != this->ThreadInfoMaps.end(); iter2++)
+		{
+			if (iter2->second->devent.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
+				&& iter2->second->devent.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT
+				&& (DWORD64)iter2->second->devent.u.Exception.ExceptionRecord.ExceptionAddress == InstructionAddr
+				&& it->second->enable == TRUE) {
+				DWORD oflag = iter2->second->ThreadContext.ContextFlags;
+				iter2->second->ThreadContext.ContextFlags = CONTEXT_CONTROL;
+				GetThreadContext(iter2->second->ThreadHandle, &iter2->second->ThreadContext);
+				iter2->second->ThreadContext.Rip = iter2->second->ThreadContext.Rip - 1;
+				SetThreadContext(iter2->second->ThreadHandle, &iter2->second->ThreadContext);
+				iter2->second->ThreadContext.ContextFlags = oflag;
+			}
 		}
 		BOOL flag=FALSE;
 		if (Ptr->enable==TRUE) {
 			flag=WritePhysicalMem(Ptr->InstructionBuffer,Ptr->InstructionLen,Ptr->InstructionAddr);
+			FlushInstructionCache(this->ProcessHandle, (LPCVOID)Ptr->InstructionAddr, Ptr->InstructionLen);
+		}
+		else
+		{
+			free(Ptr);
+			this->CodeStruct.Blist.erase(InstructionAddr);
+			if (this->CodeStruct.Pagelist[StartAddr] != NULL) {
+				this->CodeStruct.Pagelist[StartAddr]->BreakPointCounts--;
+			}
+			//LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			LeaveCriticalSection(&this->WdbgLock);
+			
+			return TRUE;
 		}
 		if (flag) {
 			free(Ptr);
@@ -414,10 +483,12 @@ BOOL WDebugerObject::DeleteBreakPoint(DWORD64 InstructionAddr)
 			if (this->CodeStruct.Pagelist[StartAddr] != NULL) {
 				this->CodeStruct.Pagelist[StartAddr]->BreakPointCounts--;
 			}
-			LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			//LeaveCriticalSection(&this->CodeStruct.CodeLock);
+			LeaveCriticalSection(&this->WdbgLock);
 			return TRUE;
 		}
-		LeaveCriticalSection(&this->CodeStruct.CodeLock);
+		//LeaveCriticalSection(&this->CodeStruct.CodeLock);
+		LeaveCriticalSection(&this->WdbgLock);
 		return FALSE;
 	}
 }
@@ -431,21 +502,21 @@ BOOL WDebugerObject::GetThreadInfo(HANDLE Tid,__out ThreadInfo* outinfo)
 		return FALSE;
 	}
 	BOOL result=FALSE;
-	EnterCriticalSection(&(this->ThreadMapLock));
+	EnterCriticalSection(&(this->WdbgLock));
 
 	if (ThreadInfoMaps.find(Tid)!=ThreadInfoMaps.end())
 	{
 		memcpy((UCHAR*)outinfo,(UCHAR*)(ThreadInfoMaps[Tid]),sizeof(ThreadInfo));
 		result = TRUE;
 	}
-	LeaveCriticalSection(&(this->ThreadMapLock));
+	LeaveCriticalSection(&(this->WdbgLock));
 	return result;
 }
 BOOL WDebugerObject::EnumDllInfo(PDLLRecordNode* head)
 {
 	if (!head) return FALSE;
 	*head = NULL;
-	EnterCriticalSection(&this->ThreadMapLock);
+	EnterCriticalSection(&this->WdbgLock);
 	PDLLRecordNode cur = this->dllhead;
 	PDLLRecordNode* insertPos = head;
 	while (cur != NULL)
@@ -453,7 +524,7 @@ BOOL WDebugerObject::EnumDllInfo(PDLLRecordNode* head)
 		PDLLRecordNode newNode = (PDLLRecordNode)malloc(sizeof(DLLRecordNode));
 		if (!newNode)
 		{
-			LeaveCriticalSection(&this->ThreadMapLock);
+			LeaveCriticalSection(&this->WdbgLock);
 			return FALSE;
 		}
 		memcpy(newNode, cur, sizeof(DLLRecordNode));
@@ -462,7 +533,7 @@ BOOL WDebugerObject::EnumDllInfo(PDLLRecordNode* head)
 		insertPos = &newNode->next;
 		cur = cur->next;
 	}
-	LeaveCriticalSection(&this->ThreadMapLock);
+	LeaveCriticalSection(&this->WdbgLock);
 	return TRUE;
 }
 
@@ -470,12 +541,12 @@ BOOL WDebugerObject::SuspendTargetThread(HANDLE Tid)
 {
 	BOOL result = FALSE;
 	HANDLE threadhandle = NULL;
-	EnterCriticalSection(&(this->ThreadMapLock));
+	EnterCriticalSection(&(this->WdbgLock));
 	if(ThreadInfoMaps.find(Tid)!=ThreadInfoMaps.end()){
 		threadhandle = ThreadInfoMaps[Tid]->ThreadHandle;
 		result = SuspendThread(threadhandle)>=0?TRUE:FALSE;
 	}
-	LeaveCriticalSection(&(this->ThreadMapLock));
+	LeaveCriticalSection(&(this->WdbgLock));
 	return result;
 }
 
@@ -483,12 +554,12 @@ BOOL WDebugerObject::ResumeTargetThread(HANDLE Tid)
 {
 	BOOL result = FALSE;
 	HANDLE threadhandle = NULL;
-	EnterCriticalSection(&(this->ThreadMapLock));
+	EnterCriticalSection(&(this->WdbgLock));
 	if (ThreadInfoMaps.find(Tid) != ThreadInfoMaps.end()) {
 		threadhandle = ThreadInfoMaps[Tid]->ThreadHandle;
 		result = ResumeThread(threadhandle)>=0?TRUE:FALSE;
 	}
-	LeaveCriticalSection(&(this->ThreadMapLock));
+	LeaveCriticalSection(&(this->WdbgLock));
 	return result;
 }
 
@@ -497,55 +568,63 @@ BOOL WDebugerObject::ResumeTargetThread(HANDLE Tid)
 VOID WDebugerObject::GetProcessInfo(CREATE_PROCESS_DEBUG_INFO* outinfo)
 {
 
-	EnterCriticalSection(&(this->ThreadMapLock));
+	EnterCriticalSection(&(this->WdbgLock));
 	memcpy(outinfo,&(this->ProcessInfo),sizeof(CREATE_PROCESS_DEBUG_INFO));
-	LeaveCriticalSection(&(this->ThreadMapLock));
+	LeaveCriticalSection(&(this->WdbgLock));
 }
 
 BOOL WDebugerObject::ChangeContext(HANDLE Tid, CONTEXT* tcontext)
 {
-	EnterCriticalSection(&(this->ThreadMapLock));
+	
+	EnterCriticalSection(&(this->WdbgLock));
 	BOOL result=FALSE;
 	if (ThreadInfoMaps.find(Tid) != ThreadInfoMaps.end())
 	{
+		DWORD oFlags = ThreadInfoMaps[Tid]->ThreadContext.ContextFlags;
+		ThreadInfoMaps[Tid]->ThreadContext.ContextFlags = CONTEXT_ALL;
 		HANDLE temphandle = ThreadInfoMaps[Tid]->ThreadHandle;
 		if (SetThreadContext(temphandle,tcontext)) {
 			memcpy((UCHAR*)&(ThreadInfoMaps[Tid]->ThreadContext),(UCHAR*)tcontext,sizeof(CONTEXT));
 			result = TRUE;
 		}
+		ThreadInfoMaps[Tid]->ThreadContext.ContextFlags = oFlags;
 	}
-	LeaveCriticalSection(&(this->ThreadMapLock));
+	LeaveCriticalSection(&(this->WdbgLock));
 	return result;
 }
 
 BOOL WDebugerObject::CreateListenThread()
 {
-	EnterCriticalSection(&(this->ThreadMapLock));
+	EnterCriticalSection(&(this->WdbgLock));
 	if (this->islisten == FALSE) {
 		this->islisten = TRUE;
 		this->listen_thread = std::thread(&WDebugerObject::ListenThread,this);
 	}
 	else
 	{
-		LeaveCriticalSection(&(this->ThreadMapLock));
+		LeaveCriticalSection(&(this->WdbgLock));
 		return FALSE;
 	}
-	LeaveCriticalSection(&(this->ThreadMapLock));
+	LeaveCriticalSection(&(this->WdbgLock));
 	return TRUE;
 }
 
 BOOL WDebugerObject::init()
 {
 	
-	this->isLockOk=InitializeCriticalSectionAndSpinCount(&(this->ThreadMapLock), 4000);
+	this->isLockOk=InitializeCriticalSectionAndSpinCount(&(this->WdbgLock), 4000);
 	if (this->isLockOk==FALSE)
 	{
 		return FALSE;
 	}
-	this->CodeStruct.CodeLockOk = InitializeCriticalSectionAndSpinCount(&(this->CodeStruct.CodeLock), 4000);
+
+	/*
+	this->CodeStruct.CodeLockOk = InitializeCriticalSectionAndSpinCount(&(this->WdbgLock), 4000);
 	if (this->CodeStruct.CodeLockOk==FALSE) {
 		return FALSE;
 	}
+	*/
+	
 	this->hDevice= CreateWdbgDevice();
 	if(this->hDevice==INVALID_HANDLE_VALUE) {
 
@@ -589,7 +668,7 @@ BOOL WDebugerObject::ReadPhysicalMem(UCHAR* readbuffer, size_t readsize,ULONG64 
 	return UserPhysicalRead(this->TargetPid,this->hDevice,VirtualAddr,readsize,readbuffer);
 }
 
-BOOL WDebugerObject::WritePhysicalMem(UCHAR* writebuffer, size_t writesize, ULONG64 VirtualAddr)
+BOOL WDebugerObject::WritePhysicalMem(const UCHAR* writebuffer, size_t writesize, ULONG64 VirtualAddr)
 {
 	if (VirtualAddr == 0) {
 		//printf("[PhysMem] WritePhysicalMem: rejected NULL address\n");
@@ -612,4 +691,36 @@ BOOL WDebugerObject::WritePhysicalMem(UCHAR* writebuffer, size_t writesize, ULON
 		return FALSE;
 	}
 	return UserPhysicalWrite(this->TargetPid,this->hDevice,VirtualAddr,writesize,writebuffer);
+}
+
+
+BOOL WDebugerObject::StepOverOneStep(HANDLE Tid)
+{
+	return 0;
+}
+
+BOOL WDebugerObject::StepIntoOneStep(HANDLE Tid) {
+	EnterCriticalSection(&this->WdbgLock);
+	auto iter = this->ThreadInfoMaps.find(Tid);
+	if (iter == this->ThreadInfoMaps.end())
+	{
+		LeaveCriticalSection(&this->WdbgLock);
+		return FALSE;
+	}
+	iter->second->stepflag = StepReasonUserSingleStep;
+	POneInstructionRecord bptr;
+	for (auto it = this->CodeStruct.Blist.begin(); it != this->CodeStruct.Blist.end(); it++)
+	{
+		bptr = it->second;
+		if (bptr->enable==TRUE&&bptr->dirty==FALSE)
+		{
+			WritePhysicalMem(bptr->InstructionBuffer,bptr->InstructionLen,bptr->InstructionAddr);
+			FlushInstructionCache(this->ProcessHandle, (LPCVOID)bptr->InstructionLen, bptr->InstructionAddr);
+			bptr->dirty = TRUE;
+		}
+	}
+	BOOL ok = this->ContinueThreadLocked(Tid);
+	LeaveCriticalSection(&this->WdbgLock);
+	return ok;
+
 }

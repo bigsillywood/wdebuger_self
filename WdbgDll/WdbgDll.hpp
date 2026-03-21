@@ -47,7 +47,7 @@ struct READ_PHY_ARG {
 struct WRITE_PHY_ARG {
 	HANDLE TargetPid;
 	PVOID TargetVirtualAddr;
-	UCHAR* WriteBufferPtr;
+	const UCHAR* WriteBufferPtr;
 	size_t write_size;
 };
 struct OPEN_PROCESS_ARG {
@@ -58,7 +58,12 @@ struct OPEN_THREAD_ARG {
 	__in HANDLE Tid;
 };	
 
-
+enum THREAD_STEP_REASON {
+	StepReasonNone = 0,
+	StepReasonBreakpointRecovery,
+	StepReasonUserSingleStep,
+	StepReasonOther
+};
 typedef struct _ThreadInfo {
 	HANDLE Tid;
 
@@ -71,6 +76,7 @@ typedef struct _ThreadInfo {
 
 	DEBUG_EVENT devent;
 	CONTEXT ThreadContext;
+	THREAD_STEP_REASON stepflag;
 }ThreadInfo,*PThreadInfo;
 
 typedef struct _DLLRecordNode {
@@ -89,6 +95,7 @@ typedef struct _OneInstructionRecord {
 	UCHAR InstructionString[192];
 	uint8_t InstructionLen;
 	BOOL enable;
+	BOOL dirty;
 }OneInstructionRecord, * POneInstructionRecord;
 
 
@@ -119,8 +126,8 @@ typedef struct _PageInfor {
 }PageInfor,*PPageInfor;
 
 typedef struct _UnionCodeStruct {
-	CRITICAL_SECTION CodeLock;
-	BOOL CodeLockOk;
+	//CRITICAL_SECTION CodeLock;
+	//BOOL CodeLockOk;
 	CapStonePageHandle CapstoneAPIhandle;
 	std::unordered_map<DWORD64, _PageInfor*>Pagelist;
 	DWORD64 CurrentLookingPageStartAddress;
@@ -151,7 +158,9 @@ private:
 
 
 	BOOL init();
-	CRITICAL_SECTION ThreadMapLock;
+	//CRITICAL_SECTION ThreadMapLock;
+	CRITICAL_SECTION WdbgLock;
+
 	BOOL isLockOk;
 
 	BOOL islisten;
@@ -159,6 +168,7 @@ private:
 	BOOL CombineThread();
 	//PDBGSS_EVENT_ENTRY ReservedHandleList;
 	VOID ADDTHREAD(DEBUG_EVENT* CreateThreadEvent);
+
 	VOID ADDPROCESS(DEBUG_EVENT* CreateProcessEvent);
 	VOID DELETETHREAD(HANDLE Tid);
 	VOID DELETEPROCESS(HANDLE MainTid);
@@ -169,7 +179,9 @@ private:
 	VOID ListenThread();
 	BOOL CahchePage(DWORD64 PageStartAddress);
 	VOID FreePage(PageInfor *Page);
+	BOOL ContinueThreadLocked(HANDLE Tid);
 	DWORD64 DumpEntryAddress(DWORD64 imagebase);
+
 	
 public:
 	WDebugerObject(HANDLE TargetPid);  
@@ -199,8 +211,12 @@ public:
 	BOOL CreateListenThread();
 	HANDLE GetDebugProcessHandle();
 	BOOL ReadPhysicalMem(UCHAR* readbuffer, size_t readsize, ULONG64 VirtualAddr);
-	BOOL WritePhysicalMem(UCHAR* writebuffer, size_t writesize, ULONG64 VirtualAddr);
+	BOOL WritePhysicalMem(const UCHAR* writebuffer, size_t writesize, ULONG64 VirtualAddr);
+	BOOL StepIntoOneStep(HANDLE Tid);
+	BOOL StepOverOneStep(HANDLE Tid);
 };
+
+
 
 
 extern "C" WDBGDLL_API BOOL CombineThreadC(HANDLE DebugHandle);
@@ -218,7 +234,7 @@ extern "C" WDBGDLL_API BOOL UserPhysicalWrite(__in HANDLE TargetPID,
 											  __in HANDLE hDevice,
 											  __in ULONG64 VirtualAddr,
 											  __in size_t WriteLen,
-											  __in UCHAR* writebuffer);
+											  __in const UCHAR* writebuffer);
 extern "C" WDBGDLL_API HANDLE UserOpenProcess(__in HANDLE TargetPid, __in HANDLE hDevice);
 extern "C" WDBGDLL_API HANDLE UserOpenThread(__in HANDLE TargetPid,__in HANDLE TargetTid,__in HANDLE hDevice);
 extern "C" WDBGDLL_API BOOL RemoveHandles(PVOID dbgreserve_0, int threadid, int processid);
