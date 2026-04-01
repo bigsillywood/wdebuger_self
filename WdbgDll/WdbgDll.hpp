@@ -62,6 +62,7 @@ enum THREAD_STEP_REASON {
 	StepReasonNone = 0,
 	StepReasonBreakpointRecovery,
 	StepReasonUserSingleStep,
+	StepReasonUserOverStep,
 	StepReasonOther
 };
 typedef struct _ThreadInfo {
@@ -83,11 +84,15 @@ typedef struct _DLLRecordNode {
 	_DLLRecordNode* next;
 	HANDLE LoadingThread;
 	LOAD_DLL_DEBUG_INFO dllinfo;
+	WCHAR *NameBufferPtr;
+	DWORD NameLen;
 }DLLRecordNode,*PDLLRecordNode;
 
 
 
 typedef struct _OneInstructionRecord {
+	//instruction type
+	unsigned int id;
 	//point to the index of the instruction in capstone structure 
 	DWORD64 InnerPageIndex;
 	DWORD64 InstructionAddr;
@@ -96,6 +101,7 @@ typedef struct _OneInstructionRecord {
 	uint8_t InstructionLen;
 	BOOL enable;
 	BOOL dirty;
+	BOOL OnlyOver;
 }OneInstructionRecord, * POneInstructionRecord;
 
 
@@ -211,9 +217,16 @@ public:
 	BOOL CreateListenThread();
 	HANDLE GetDebugProcessHandle();
 	BOOL ReadPhysicalMem(UCHAR* readbuffer, size_t readsize, ULONG64 VirtualAddr);
-	BOOL WritePhysicalMem(const UCHAR* writebuffer, size_t writesize, ULONG64 VirtualAddr);
+	BOOL WritePhysicalMem(UCHAR* writebuffer, size_t writesize, ULONG64 VirtualAddr);
 	BOOL StepIntoOneStep(HANDLE Tid);
 	BOOL StepOverOneStep(HANDLE Tid);
+
+
+	//this function will get the import Table Entry Address for hooking
+	DWORD64 GetImportAPIAddressPtrByName(WCHAR *SpaceDllName,CHAR *ImportDllName,CHAR* APIName);
+
+	//this function will get the export Tabel Enrtry Address for hooking
+	DWORD64 GetExportAPIAddressPtrByName(WCHAR *DllName,CHAR* APIName);
 };
 
 
@@ -234,7 +247,7 @@ extern "C" WDBGDLL_API BOOL UserPhysicalWrite(__in HANDLE TargetPID,
 											  __in HANDLE hDevice,
 											  __in ULONG64 VirtualAddr,
 											  __in size_t WriteLen,
-											  __in const UCHAR* writebuffer);
+											  __in UCHAR* writebuffer);
 extern "C" WDBGDLL_API HANDLE UserOpenProcess(__in HANDLE TargetPid, __in HANDLE hDevice);
 extern "C" WDBGDLL_API HANDLE UserOpenThread(__in HANDLE TargetPid,__in HANDLE TargetTid,__in HANDLE hDevice);
 extern "C" WDBGDLL_API BOOL RemoveHandles(PVOID dbgreserve_0, int threadid, int processid);

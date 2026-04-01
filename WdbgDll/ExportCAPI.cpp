@@ -153,7 +153,7 @@ BOOL UserPhysicalRead(__in HANDLE TargetPid,__in HANDLE hDevice,__in ULONG64 Vir
 }
 
 
-BOOL UserPhysicalWrite(__in HANDLE TargetPID,__in HANDLE hDevice,__in ULONG64 VirtualAddr,__in size_t WriteLen,__in const UCHAR* writebuffer)
+BOOL UserPhysicalWrite(__in HANDLE TargetPID,__in HANDLE hDevice,__in ULONG64 VirtualAddr,__in size_t WriteLen,__in UCHAR* writebuffer)
 {
     struct WRITE_PHY_ARG arg;
     arg.TargetPid = (HANDLE)(ULONG_PTR)TargetPID;

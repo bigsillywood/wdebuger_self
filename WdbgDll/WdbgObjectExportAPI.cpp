@@ -1,7 +1,7 @@
 
 #include "WdbgDll.hpp"
 
-
+UCHAR BreakPointerBuffer[24] = { 0xcc,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90 };
 WDebugerObject::WDebugerObject(HANDLE TargetPid)
 {
 	this->MainThreadid = NULL;
@@ -121,16 +121,33 @@ BOOL WDebugerObject::ContinueThread(HANDLE Tid)
 		LeaveCriticalSection(&this->WdbgLock);
 		return FALSE;
 	}
+	if (iter->second->devent.dwDebugEventCode == 0) {
+		LeaveCriticalSection(&this->WdbgLock);
+		return FALSE;
+	}
 	iter->second->stepflag = StepReasonNone;
 	POneInstructionRecord bptr;
-	for (auto it = this->CodeStruct.Blist.begin(); it != this->CodeStruct.Blist.end(); it++)
+	for (auto it = this->CodeStruct.Blist.begin(); it != this->CodeStruct.Blist.end();)
 	{
 		bptr = it->second;
-		if (bptr->enable == TRUE && bptr->dirty == TRUE)
+		if (bptr->OnlyOver == TRUE&&bptr->InstructionAddr!=iter->second->ThreadContext.Rip)
 		{
-			WritePhysicalMem(BreakPointerBuffer, bptr->InstructionLen, bptr->InstructionAddr);
-			FlushInstructionCache(this->ProcessHandle, (LPCVOID)bptr->InstructionLen, bptr->InstructionAddr);
-			bptr->dirty = FALSE;
+			WritePhysicalMem(bptr->InstructionBuffer, bptr->InstructionLen, bptr->InstructionAddr);
+			FlushInstructionCache(this->ProcessHandle, (LPCVOID)bptr->InstructionAddr, bptr->InstructionLen);
+			it = this->CodeStruct.Blist.erase(it);
+			DWORD64 StartAddr = bptr->InstructionAddr & (~0XFFF);
+			this->CodeStruct.Pagelist.find(StartAddr)->second->CodeCounts--;
+			free(bptr);
+		}
+		else
+		{
+			if (bptr->enable == TRUE && bptr->dirty == TRUE)
+			{
+				WritePhysicalMem(BreakPointerBuffer, bptr->InstructionLen, bptr->InstructionAddr);
+				FlushInstructionCache(this->ProcessHandle, (LPCVOID)bptr->InstructionAddr, bptr->InstructionLen);
+				bptr->dirty = FALSE;
+			}
+			++it;
 		}
 	}
 	BOOL ok = this->ContinueThreadLocked(Tid);
@@ -299,9 +316,10 @@ BOOL WDebugerObject::SetBreakPointUp(DWORD64 InstructionAddr)
 		{
 			if (InsPtr->enable==FALSE){
 				if (this->WritePhysicalMem(BreakPointerBuffer, InsPtr->InstructionLen, InstructionAddr)) {
-					FlushInstructionCache(this->ProcessHandle, (LPCVOID)InsPtr->InstructionLen, InsPtr->InstructionAddr);
+					FlushInstructionCache(this->ProcessHandle, (LPCVOID)InsPtr->InstructionAddr, InsPtr->InstructionLen);
 					InsPtr->enable = TRUE;
 					InsPtr->dirty = FALSE;
+					InsPtr->OnlyOver = FALSE;
 					LeaveCriticalSection(&this->WdbgLock);
 					return TRUE;
 				}
@@ -339,6 +357,7 @@ BOOL WDebugerObject::SetBreakPointUp(DWORD64 InstructionAddr)
 			InstructionPtr->InnerPageIndex = i;
 			InstructionPtr->InstructionAddr = InstructionAddr;
 			InstructionPtr->InstructionLen = tempPtr->size;
+			InstructionPtr->id = tempPtr->id;
 			memcpy(InstructionPtr->InstructionBuffer,tempPtr->bytes,InstructionPtr->InstructionLen);
 			_snprintf_s(
 				(char*)InstructionPtr->InstructionString,
@@ -349,9 +368,10 @@ BOOL WDebugerObject::SetBreakPointUp(DWORD64 InstructionAddr)
 				tempPtr->op_str
 			);
 			if(this->WritePhysicalMem(BreakPointerBuffer,InstructionPtr->InstructionLen,InstructionAddr)){
-				FlushInstructionCache(this->ProcessHandle,(LPCVOID)InstructionPtr->InstructionLen,InstructionPtr->InstructionAddr);
+				FlushInstructionCache(this->ProcessHandle,(LPCVOID)InstructionPtr->InstructionAddr,InstructionPtr->InstructionLen);
 				InstructionPtr->enable = TRUE;
 				InstructionPtr->dirty = FALSE;
+				InstructionPtr->OnlyOver = FALSE;
 				this->CodeStruct.Blist[InstructionAddr] = InstructionPtr;
 				this->CodeStruct.Pagelist[StartAddress]->BreakPointCounts++;
 
@@ -391,6 +411,7 @@ BOOL WDebugerObject::SetBreakPointDown(DWORD64 InstructionAddr)
 			return TRUE;
 		}
 
+		
 		for (auto iter2 = this->ThreadInfoMaps.begin(); iter2 != this->ThreadInfoMaps.end(); iter2++)
 		{
 			if (iter2->second->devent.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
@@ -399,12 +420,18 @@ BOOL WDebugerObject::SetBreakPointDown(DWORD64 InstructionAddr)
 				&& it->second->enable == TRUE) {
 				DWORD oflag = iter2->second->ThreadContext.ContextFlags;
 				iter2->second->ThreadContext.ContextFlags = CONTEXT_CONTROL;
+				/*
 				GetThreadContext(iter2->second->ThreadHandle, &iter2->second->ThreadContext);
 				iter2->second->ThreadContext.Rip = iter2->second->ThreadContext.Rip - 1;
+				*/
+				
 				SetThreadContext(iter2->second->ThreadHandle, &iter2->second->ThreadContext);
 				iter2->second->ThreadContext.ContextFlags = oflag;
 			}
 		}
+		
+		
+
 		if (this->WritePhysicalMem(ptr->InstructionBuffer,ptr->InstructionLen,ptr->InstructionAddr)) {
 			FlushInstructionCache(this->ProcessHandle,(LPCVOID)ptr->InstructionAddr,ptr->InstructionLen);
 			ptr->enable = FALSE;
@@ -446,6 +473,7 @@ BOOL WDebugerObject::DeleteBreakPoint(DWORD64 InstructionAddr)
 			LeaveCriticalSection(&this->WdbgLock);
 			return TRUE;
 		}
+
 		for (auto iter2 = this->ThreadInfoMaps.begin(); iter2 != this->ThreadInfoMaps.end(); iter2++)
 		{
 			if (iter2->second->devent.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
@@ -454,12 +482,12 @@ BOOL WDebugerObject::DeleteBreakPoint(DWORD64 InstructionAddr)
 				&& it->second->enable == TRUE) {
 				DWORD oflag = iter2->second->ThreadContext.ContextFlags;
 				iter2->second->ThreadContext.ContextFlags = CONTEXT_CONTROL;
-				GetThreadContext(iter2->second->ThreadHandle, &iter2->second->ThreadContext);
-				iter2->second->ThreadContext.Rip = iter2->second->ThreadContext.Rip - 1;
 				SetThreadContext(iter2->second->ThreadHandle, &iter2->second->ThreadContext);
 				iter2->second->ThreadContext.ContextFlags = oflag;
 			}
 		}
+		
+
 		BOOL flag=FALSE;
 		if (Ptr->enable==TRUE) {
 			flag=WritePhysicalMem(Ptr->InstructionBuffer,Ptr->InstructionLen,Ptr->InstructionAddr);
@@ -668,7 +696,7 @@ BOOL WDebugerObject::ReadPhysicalMem(UCHAR* readbuffer, size_t readsize,ULONG64 
 	return UserPhysicalRead(this->TargetPid,this->hDevice,VirtualAddr,readsize,readbuffer);
 }
 
-BOOL WDebugerObject::WritePhysicalMem(const UCHAR* writebuffer, size_t writesize, ULONG64 VirtualAddr)
+BOOL WDebugerObject::WritePhysicalMem(UCHAR* writebuffer, size_t writesize, ULONG64 VirtualAddr)
 {
 	if (VirtualAddr == 0) {
 		//printf("[PhysMem] WritePhysicalMem: rejected NULL address\n");
@@ -696,7 +724,53 @@ BOOL WDebugerObject::WritePhysicalMem(const UCHAR* writebuffer, size_t writesize
 
 BOOL WDebugerObject::StepOverOneStep(HANDLE Tid)
 {
-	return 0;
+	EnterCriticalSection(&this->WdbgLock);
+	auto iter = this->ThreadInfoMaps.find(Tid);
+	if (iter == this->ThreadInfoMaps.end())
+	{
+		LeaveCriticalSection(&this->WdbgLock);
+		return FALSE;
+	}
+	if (iter->second->devent.dwDebugEventCode==0) {
+		LeaveCriticalSection(&this->WdbgLock);
+		return FALSE;
+	}
+	POneInstructionRecord bptr;
+	for (auto it = this->CodeStruct.Blist.begin(); it != this->CodeStruct.Blist.end();)
+	{
+		bptr = it->second;
+		if (bptr->OnlyOver==TRUE)
+		{
+			WritePhysicalMem(bptr->InstructionBuffer, bptr->InstructionLen, bptr->InstructionAddr);
+			FlushInstructionCache(this->ProcessHandle, (LPCVOID)bptr->InstructionAddr, bptr->InstructionLen);
+			DWORD64 StartAddr = bptr->InstructionAddr&(~0XFFF);
+			this->CodeStruct.Pagelist.find(StartAddr)->second->CodeCounts--;
+			free(bptr);
+			it = this->CodeStruct.Blist.erase(it);
+		}
+		else
+		{
+			if (bptr->enable == TRUE && bptr->dirty == FALSE && bptr->InstructionAddr == iter->second->ThreadContext.Rip)
+			{
+				WritePhysicalMem(bptr->InstructionBuffer, bptr->InstructionLen, bptr->InstructionAddr);
+				FlushInstructionCache(this->ProcessHandle, (LPCVOID)bptr->InstructionAddr, bptr->InstructionLen);
+				bptr->dirty = TRUE;
+			}
+			else if (bptr->enable==TRUE &&bptr->dirty==TRUE &&bptr->InstructionAddr!=iter->second->ThreadContext.Rip )
+			{
+				WritePhysicalMem(BreakPointerBuffer, bptr->InstructionLen, bptr->InstructionAddr);
+				FlushInstructionCache(this->ProcessHandle, (LPCVOID)bptr->InstructionAddr, bptr->InstructionLen);
+				bptr->dirty = FALSE;
+			}
+			++it;
+		}
+		
+	}
+	iter->second->stepflag = StepReasonUserOverStep;
+	this->ContinueThreadLocked(Tid);
+
+	LeaveCriticalSection(&this->WdbgLock);
+	return TRUE;
 }
 
 BOOL WDebugerObject::StepIntoOneStep(HANDLE Tid) {
@@ -707,16 +781,35 @@ BOOL WDebugerObject::StepIntoOneStep(HANDLE Tid) {
 		LeaveCriticalSection(&this->WdbgLock);
 		return FALSE;
 	}
+	if (iter->second->devent.dwDebugEventCode == 0) {
+		LeaveCriticalSection(&this->WdbgLock);
+		return FALSE;
+	}
 	iter->second->stepflag = StepReasonUserSingleStep;
 	POneInstructionRecord bptr;
-	for (auto it = this->CodeStruct.Blist.begin(); it != this->CodeStruct.Blist.end(); it++)
+
+	for (auto it = this->CodeStruct.Blist.begin(); it != this->CodeStruct.Blist.end();)
 	{
+
 		bptr = it->second;
-		if (bptr->enable==TRUE&&bptr->dirty==FALSE)
+		if (bptr->OnlyOver == TRUE)
 		{
-			WritePhysicalMem(bptr->InstructionBuffer,bptr->InstructionLen,bptr->InstructionAddr);
-			FlushInstructionCache(this->ProcessHandle, (LPCVOID)bptr->InstructionLen, bptr->InstructionAddr);
-			bptr->dirty = TRUE;
+			WritePhysicalMem(bptr->InstructionBuffer, bptr->InstructionLen, bptr->InstructionAddr);
+			FlushInstructionCache(this->ProcessHandle, (LPCVOID)bptr->InstructionAddr, bptr->InstructionLen);
+			DWORD64 StartAddr = bptr->InstructionAddr & (~0XFFF);
+			this->CodeStruct.Pagelist.find(StartAddr)->second->CodeCounts--;
+			free(bptr);
+			it = this->CodeStruct.Blist.erase(it);
+		}
+		else
+		{
+			if (bptr->enable == TRUE && bptr->dirty == FALSE &&bptr->InstructionAddr==iter->second->ThreadContext.Rip)
+			{
+				WritePhysicalMem(bptr->InstructionBuffer, bptr->InstructionLen, bptr->InstructionAddr);
+				FlushInstructionCache(this->ProcessHandle, (LPCVOID)bptr->InstructionAddr, bptr->InstructionLen);
+				bptr->dirty = TRUE;
+			}
+			++it;
 		}
 	}
 	BOOL ok = this->ContinueThreadLocked(Tid);

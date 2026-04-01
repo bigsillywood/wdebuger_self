@@ -1,4 +1,31 @@
 #include"WdbgDll.hpp"
+
+UCHAR BreakPointerBuffer1[24] = { 0xcc,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90 };
+BOOL FindInsInPageLocked(PageInfor *page,POneInstructionRecord InsPtr,DWORD64 InsAddr) {
+	cs_insn* StartIns = page->PageCodes;
+	SIZE_T Index=0;
+	while (Index<page->CodeCounts)
+	{
+		if (StartIns[Index].address==InsAddr) {
+			InsPtr->id = StartIns[Index].id;
+			InsPtr->InnerPageIndex = Index;
+			InsPtr->InstructionAddr = InsAddr;
+			InsPtr->InstructionLen = StartIns[Index].size;
+			memcpy(InsPtr->InstructionBuffer,StartIns[Index].bytes, InsPtr->InstructionLen);
+			_snprintf_s(
+				(char*)InsPtr->InstructionString,
+				192,
+				_TRUNCATE,
+				"%s %s",
+				StartIns[Index].mnemonic,
+				StartIns[Index].op_str
+			);
+			return TRUE;
+		}
+		Index++;
+	}
+	return FALSE;
+}
 BOOL WDebugerObject::CombineThread()
 {
 
@@ -150,7 +177,34 @@ VOID WDebugerObject::LOADDLL(DEBUG_EVENT* LoadDllEvent)
 		NewNode->next = this->dllhead;
 		this->dllhead = NewNode;
 	}
+	WCHAR buffer[256] = { 0 };
+	DWORD PathLen=GetFinalPathNameByHandleW(NewNode->dllinfo.hFile,buffer,256, FILE_NAME_NORMALIZED| VOLUME_NAME_DOS);
+	if (PathLen<256)
+	{
+		//SUCCEED
+		DWORD LeftIndex = PathLen-1;
+		while (buffer[LeftIndex]!=L'\\'&&LeftIndex>=0)
+		{
+			LeftIndex--;
+		}
+		LeftIndex = LeftIndex + 1;
 
+		NewNode->NameLen = PathLen - LeftIndex;
+		NewNode->NameBufferPtr = (WCHAR*)malloc(sizeof(WCHAR)*(NewNode->NameLen+1));
+		if (NewNode->NameBufferPtr == NULL)
+		{
+
+			NewNode->NameLen = 0;
+		}
+		else {
+			memcpy(NewNode->NameBufferPtr, buffer+LeftIndex, sizeof(WCHAR) * (NewNode->NameLen + 1));
+			NewNode->NameBufferPtr[NewNode->NameLen] = 0x00;
+		}
+	}
+	else
+	{
+		NewNode->NameLen = 0;
+	}
 	//LeaveCriticalSection(&(this->ThreadMapLock));
 }
 
@@ -370,7 +424,7 @@ BOOL WDebugerObject::ContinueThreadLocked(HANDLE Tid)
 		&&TempThreadInfo->stepflag==StepReasonNone)
 	{
 		auto iter2 = this->CodeStruct.Blist.find((DWORD64)TempThreadInfo->devent.u.Exception.ExceptionRecord.ExceptionAddress);
-		if (iter2!=this->CodeStruct.Blist.end()&&iter2->second->enable==TRUE)
+		if (iter2!=this->CodeStruct.Blist.end()&&(iter2->second->enable==TRUE||iter2->second->OnlyOver==TRUE))
 		{
 			BOOL cflag=CombineThreadC(this->DebugHandle);
 			POneInstructionRecord BreakPointPtr = iter2->second;
@@ -480,7 +534,7 @@ BOOL WDebugerObject::ContinueThreadLocked(HANDLE Tid)
 							TempThreadInfo->ThreadContext.EFlags &= (~0x100);
 							BOOL flag = SetThreadContext(TempThreadInfo->ThreadHandle,&TempThreadInfo->ThreadContext);
 							if (flag) {
-								this->WritePhysicalMem(BreakPointerBuffer, BreakPointInstuctionLen, BreakPointAddr);
+								this->WritePhysicalMem(BreakPointerBuffer1, BreakPointInstuctionLen, BreakPointAddr);
 								FlushInstructionCache(this->ProcessHandle, (LPCVOID)BreakPointAddr, BreakPointInstuctionLen);
 							}
 							goto exit;
@@ -488,6 +542,14 @@ BOOL WDebugerObject::ContinueThreadLocked(HANDLE Tid)
 							TempThreadInfo->stepflag = oreason;
 							TempThreadInfo->ThreadContext.ContextFlags = oContextflag;
 							EXCEPTIONRECORD(&_devent);
+							TempThreadInfo->ThreadContext.ContextFlags = CONTEXT_CONTROL;
+							GetThreadContext(TempThreadInfo->ThreadHandle, &TempThreadInfo->ThreadContext);
+							TempThreadInfo->ThreadContext.EFlags &= (~0x100);
+							BOOL flag = SetThreadContext(TempThreadInfo->ThreadHandle, &TempThreadInfo->ThreadContext);
+							if (flag) {
+								this->WritePhysicalMem(BreakPointerBuffer1, BreakPointInstuctionLen, BreakPointAddr);
+								FlushInstructionCache(this->ProcessHandle, (LPCVOID)BreakPointAddr, BreakPointInstuctionLen);
+							}
 							return TRUE;
 						}
 					}
@@ -536,6 +598,136 @@ BOOL WDebugerObject::ContinueThreadLocked(HANDLE Tid)
 		SetThreadContext(TempThreadInfo->ThreadHandle,&TempThreadInfo->ThreadContext);
 		goto exit;
 	}
+	//user stepover 
+	if (TempThreadInfo->stepflag==StepReasonUserOverStep&&TempThreadInfo->devent.dwDebugEventCode==EXCEPTION_DEBUG_EVENT)
+	{
+		POneInstructionRecord CurIns;
+		POneInstructionRecord NextIns;
+		PPageInfor PagePtr;
+		DWORD64 NextInsAddr;
+		DWORD64 StartAddr;
+		auto iter2 = this->CodeStruct.Blist.find(TempThreadInfo->ThreadContext.Rip);
+		if (iter2!=this->CodeStruct.Blist.end()) {
+			CurIns = iter2->second;
+			if (CurIns->id==X86_INS_CALL)
+			{
+
+				NextInsAddr = CurIns->InstructionAddr + CurIns->InstructionLen;
+				if (this->CodeStruct.Blist.find(NextInsAddr)!=this->CodeStruct.Blist.end())
+				{
+					NextIns = this->CodeStruct.Blist.find(NextInsAddr)->second;
+					goto SkipCacheNext;
+				}
+				StartAddr = NextInsAddr & (~0XFFF);
+				auto PageIter = this->CodeStruct.Pagelist.find(StartAddr);
+				if (PageIter==this->CodeStruct.Pagelist.end())
+				{
+					this->CahchePage(StartAddr);
+				}
+				PageIter = this->CodeStruct.Pagelist.find(StartAddr);
+				if (PageIter==this->CodeStruct.Pagelist.end())
+				{
+					goto exit;
+				}
+				PagePtr = PageIter->second;
+				NextIns = (POneInstructionRecord)malloc(sizeof(OneInstructionRecord));
+				if (NextIns==NULL)
+				{
+					goto exit;
+				}
+				if (!FindInsInPageLocked(PagePtr,NextIns,NextInsAddr))
+				{
+					goto exit;
+				}
+			}
+			else
+			{
+				TempThreadInfo->ThreadContext.ContextFlags = CONTEXT_CONTROL;
+				TempThreadInfo->ThreadContext.EFlags |= 0x100;
+				SetThreadContext(TempThreadInfo->ThreadHandle, &TempThreadInfo->ThreadContext);
+				goto exit;
+			}
+		}
+		else
+		{
+			StartAddr = TempThreadInfo->ThreadContext.Rip&(~0xFFF);
+			auto pageiter = this->CodeStruct.Pagelist.find(StartAddr);
+			if (pageiter==this->CodeStruct.Pagelist.end())
+			{
+				this->CahchePage(StartAddr);
+			}
+			pageiter = this->CodeStruct.Pagelist.find(StartAddr);
+			if (pageiter==this->CodeStruct.Pagelist.end())
+			{
+				goto exit;
+			}
+			PagePtr = this->CodeStruct.Pagelist.find(StartAddr)->second;
+			CurIns = (POneInstructionRecord)malloc(sizeof(OneInstructionRecord));
+			
+			if (!FindInsInPageLocked(PagePtr,CurIns,TempThreadInfo->ThreadContext.Rip))
+			{
+				goto exit;
+			}
+			if (CurIns == NULL)
+			{
+				goto exit;
+			}
+			if (CurIns->id==X86_INS_CALL)
+			{
+				NextInsAddr = CurIns->InstructionAddr + CurIns->InstructionLen;
+				if (this->CodeStruct.Blist.find(NextInsAddr) != this->CodeStruct.Blist.end())
+				{
+					free(CurIns);
+					NextIns = this->CodeStruct.Blist.find(NextInsAddr)->second;
+					goto SkipCacheNext;
+				}
+				StartAddr = NextInsAddr & (~0xFFF);
+				pageiter = this->CodeStruct.Pagelist.find(StartAddr);
+				if (pageiter == this->CodeStruct.Pagelist.end())
+				{
+					this->CahchePage(StartAddr);
+				}
+				pageiter = this->CodeStruct.Pagelist.find(StartAddr);
+				if (pageiter == this->CodeStruct.Pagelist.end())
+				{
+					free(CurIns);
+					goto exit;
+				}
+				NextIns = (POneInstructionRecord)malloc(sizeof(OneInstructionRecord));
+				if (!FindInsInPageLocked(PagePtr, NextIns, NextInsAddr))
+				{
+					free(CurIns);
+					goto exit;
+				}
+			}
+			else {
+				free(CurIns);
+				TempThreadInfo->ThreadContext.ContextFlags = CONTEXT_CONTROL;
+				TempThreadInfo->ThreadContext.EFlags |= 0x100;
+				SetThreadContext(TempThreadInfo->ThreadHandle, &TempThreadInfo->ThreadContext);
+				goto exit;
+			}
+		}
+		if (NextIns==NULL)
+		{
+			goto exit;
+		}
+		NextIns->enable = FALSE;
+		NextIns->dirty = FALSE;
+		NextIns->OnlyOver = TRUE;
+		this->CodeStruct.Blist[NextInsAddr] = NextIns;
+	SkipCacheNext:
+		WritePhysicalMem(BreakPointerBuffer1,NextIns->InstructionLen,NextIns->InstructionAddr);
+		FlushInstructionCache(this->ProcessHandle, (LPCVOID)NextIns->InstructionAddr, NextIns->InstructionLen);
+		if (NextIns->enable==TRUE)
+		{
+			NextIns->dirty = FALSE;
+		}
+		TempThreadInfo->ThreadContext.ContextFlags = CONTEXT_CONTROL;
+		TempThreadInfo->ThreadContext.EFlags &= (~0x100);	
+		SetThreadContext(TempThreadInfo->ThreadHandle, &TempThreadInfo->ThreadContext);
+		goto exit;
+	}
 exit:
 	TempThreadInfo->stepflag = oreason;
 	TempThreadInfo->ThreadContext.ContextFlags = oContextflag;
@@ -559,6 +751,7 @@ VOID WDebugerObject::CLEANALLDLL()
 	while (cur != NULL) {
 		temp = cur;
 		cur = cur->next;
+		free(temp->NameBufferPtr);
 		CloseHandle(temp->dllinfo.hFile);
 		free(temp);
 	}
