@@ -72,7 +72,7 @@ NTSTATUS UserWriteMemory(PDEVICE_OBJECT device_ptr,PIRP irp_ptr,PIO_STACK_LOCATI
 		return STATUS_INSUFFICIENT_RESOURCES;
 	}
 	__try {
-		MmProbeAndLockPages(mdl_ptr,UserMode,IoWriteAccess);
+		MmProbeAndLockPages(mdl_ptr,UserMode, IoReadAccess);
 	}__except(EXCEPTION_EXECUTE_HANDLER) {
 		IoFreeMdl(mdl_ptr);
 		return STATUS_INVALID_USER_BUFFER;
@@ -135,6 +135,18 @@ NTSTATUS UserOpenThread(PDEVICE_OBJECT device_ptr, PIRP irp_ptr, PIO_STACK_LOCAT
 	{
 		*((HANDLE*)(irp_ptr->AssociatedIrp.SystemBuffer)) = NULL;
 	}
+	return status;
+}
+
+NTSTATUS UserAntiDetection(PDEVICE_OBJECT device_ptr, PIRP irp_ptr, PIO_STACK_LOCATION stack)
+{
+	NTSTATUS status = STATUS_SUCCESS;
+	if (stack->Parameters.DeviceIoControl.InputBufferLength!=sizeof(struct AntiDetection_ARG))
+	{
+		return STATUS_INVALID_PARAMETER;
+	}
+	struct AntiDetection_ARG* args = (struct AntiDetection_ARG*)irp_ptr->AssociatedIrp.SystemBuffer;
+	status = AntiDebugerDetection(args->TargetPid);
 	return status;
 }
 

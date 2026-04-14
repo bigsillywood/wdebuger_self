@@ -49,10 +49,12 @@ NTSTATUS IOCTL_FUNC(PDEVICE_OBJECT device_ptr, PIRP irp_ptr) {
 		status = UserWriteMemory(device_ptr, irp_ptr, stack);
 		break;
 	}
-	
+	case IOCTL_ANTI_DETECTION:
+	{
+		status = UserAntiDetection(device_ptr,irp_ptr,stack);
+	}
 	default:
 	{
-
 		break;
 	}
 	}

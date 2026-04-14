@@ -9,6 +9,7 @@ NTSTATUS ReadPhysicalMemory(ULONG64 Physical_ptr, UCHAR* outputbuffer, size_t re
 	return MmCopyMemory(outputbuffer, targetaddr, readlen, MM_COPY_MEMORY_PHYSICAL,copiedsize);
 }
 NTSTATUS  WritePhysicalMemory(ULONG64 ptr,UCHAR* inputbuffer,size_t writelen) {
+	//DbgBreakPoint();
 	PHYSICAL_ADDRESS targetaddr;
 	targetaddr.QuadPart = ptr;
 	UCHAR* virtualaddr = NULL;
@@ -18,6 +19,7 @@ NTSTATUS  WritePhysicalMemory(ULONG64 ptr,UCHAR* inputbuffer,size_t writelen) {
 		return STATUS_UNSUCCESSFUL;
 	}
 	RtlCopyMemory(virtualaddr,inputbuffer,writelen);
+	MmUnmapIoSpace(virtualaddr, writelen);
 	return STATUS_SUCCESS;
 }
 NTSTATUS GetTargetPhysicalMemory(__in ULONG64 cr3,__in ULONG64 VirtualAddress,__out PULONG64 PhysicalAddress) {
@@ -133,4 +135,36 @@ NTSTATUS WriteTargetPhysicalMemory(__in HANDLE TargetPid, __in PVOID VirtualAddr
 	ObDereferenceObject(PTargetEprocess);
 	return status;
 }
+/*
+
+NTSTATUS AllocTargetVirtualMemory(HANDLE TargetPid, PVOID StartAddress, SIZE_T *SpaceSize, PVOID *ActualStartAddress)
+{
+	HANDLE ProcessHandle=NULL;
+	OBJECT_ATTRIBUTES oa = { 0 };
+	CLIENT_ID cid;
+	cid.UniqueProcess = TargetPid;
+	cid.UniqueThread = NULL;
+	NTSTATUS result = ZwOpenProcess(&ProcessHandle,PROCESS_ALL_ACCESS,&oa,&cid);
+	if (!NT_SUCCESS(result))
+	{
+		return result;
+	}
+	result = ZwAllocateVirtualMemory(ProcessHandle,
+		ActualStartAddress,
+		0,
+		SpaceSize,
+		MEM_COMMIT|MEM_RESERVE,
+		PAGE_EXECUTE
+	);
+	if (NT_SUCCESS(result))
+	{
+
+	}
+
+	return result;
+}
+
+
+*/
+
 

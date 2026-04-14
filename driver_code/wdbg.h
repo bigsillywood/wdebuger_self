@@ -11,6 +11,8 @@
 #define OPEN_TARGET_PROCESS 0x804
 #define CREATE_TARGET_PROCESS 0X805
 #define OPEN_TARGET_THREAD 0x806
+#define ANTI_DETECTION 0X807
+//#define ALLOC_MEMORY 0X808
 
 #define IOCTL_CREATE_DEBUG_OBJ CTL_CODE(FILE_DEVICE_UNKNOWN,CREATE_DEBUG_OBJ,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_READ_PHYSICAL_MEM CTL_CODE(FILE_DEVICE_UNKNOWN,READ_PHYSICAL_MEM,METHOD_BUFFERED,FILE_ANY_ACCESS)
@@ -18,7 +20,8 @@
 #define IOCTL_OPEN_TARGET_PROCESS CTL_CODE(FILE_DEVICE_UNKNOWN,OPEN_TARGET_PROCESS,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_CREATE_TARGET_PROCESS CTL_CODE(FILE_DEVICE_UNKNOWN,CREATE_TARGET_PROCESS,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_OPEN_TARGET_THREAD CTL_CODE(FILE_DEVICE_UNKNOWN,OPEN_TARGET_THREAD,METHOD_BUFFERED,FILE_ANY_ACCESS)
-
+#define IOCTL_ANTI_DETECTION CTL_CODE(FILE_DEVICE_UNKNOWN,ANTI_DETECTION,METHOD_BUFFERED,FILE_ANY_ACCESS)
+//#define IOPCTL_ALLOC_MEMORY CTL_CODE(FILE_DEVICE_UNKNOWN,ALLOC_MEMORY,METHOD_BUFFERED,FILE_ANY_ACCESS)
 
 // 64-bit driver code
 /*
@@ -51,13 +54,17 @@ struct OPEN_THREAD_ARG {
 };
 struct QUERY_THREADLIST_ARG {
 	__in HANDLE TargetProcessHandle;
-	__out UCHAR *buffer;
+	__out UCHAR* buffer;
 	__in size_t buffer_size;
 };
+
 
 struct CREATE_PROCESS_ARG {
 	PHANDLE ProcessHandlePtr;
 	PHANDLE ThreadHandlePtr;
+};
+struct AntiDetection_ARG {
+	__in HANDLE TargetPid;
 };
 
 
@@ -75,12 +82,14 @@ typedef struct SSDT_SET
     PKSERVICE_DESCRIPTOR_TABLE SSDTfilter;
 }SSDT_SET, * PSSDT_SET;
 
+
+
 enum ssdttype
 {
     normal = 0, shadow, filter
 
 };
-
+NTKERNELAPI PVOID NTAPI PsGetProcessPeb(_In_ PEPROCESS Process);
 
 typedef NTSTATUS(NTAPI* PFN_ZwCreateDebugObject)(
 	PHANDLE DebugObjectHandle,
@@ -162,9 +171,12 @@ ZwGetNextThread(
 	ULONG Flags,                // 保留，必须为 0
 	PHANDLE NewThreadHandle     // 输出：下一个线程句柄
 );
-
+/*
+memory_operation.c
+*/
 NTSTATUS ReadTargetPhysicalMemory(__in HANDLE TargetPid, __in PVOID VirtualAddress, __in SIZE_T readlen, __out UCHAR* outputbuffer, size_t* actual_size);
 NTSTATUS WriteTargetPhysicalMemory(__in HANDLE TargetPid, __in PVOID VirtualAddress, __in SIZE_T writelen, __in UCHAR* inputbuffer);
+//NTSTATUS AllocTargetVirtualMemory(__in HANDLE TargetPid,__in PVOID StartAddress,__in SIZE_T SpaceSize,__out PVOID *ActualStartAddress);
 /*
 scan.c
 */
@@ -186,6 +198,7 @@ NTSTATUS UserReadMemory(PDEVICE_OBJECT device_ptr, PIRP irp_ptr, PIO_STACK_LOCAT
 NTSTATUS UserWriteMemory(PDEVICE_OBJECT device_ptr, PIRP irp_ptr, PIO_STACK_LOCATION stack);
 NTSTATUS UserOpenProcess(PDEVICE_OBJECT device_ptr,PIRP irp_ptr,PIO_STACK_LOCATION stack);
 NTSTATUS UserOpenThread(PDEVICE_OBJECT device_ptr, PIRP irp_ptr, PIO_STACK_LOCATION stack);
+NTSTATUS UserAntiDetection(PDEVICE_OBJECT device_ptr, PIRP irp_ptr, PIO_STACK_LOCATION stack);
 /*
 callback.c
 */
@@ -205,3 +218,7 @@ NTSTATUS KrnlOpenThread(__in PCLIENT_ID pcid,__out HANDLE *handle_out);
 processmonitor.c
 */
 NTSTATUS EnumProcessThreadId(HANDLE TargetProcessHandle, UCHAR* ThreadIdBuffer, size_t buffersize);
+/*
+antidetect.c
+*/
+NTSTATUS AntiDebugerDetection(HANDLE TargetProcessHandle);
