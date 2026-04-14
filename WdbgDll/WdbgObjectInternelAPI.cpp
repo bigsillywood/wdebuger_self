@@ -66,16 +66,13 @@ VOID WDebugerObject::ADDTHREAD(DEBUG_EVENT* CreateThreadEvent)
 	//EnterCriticalSection(&(this->ThreadMapLock));
 	this->ThreadInfoMaps[NewInfo->Tid] = NewInfo;
 	//LeaveCriticalSection(&(this->ThreadMapLock));
+
 }
 
 VOID WDebugerObject::ADDPROCESS(DEBUG_EVENT* CreateProcessEvent)
 {
 	ThreadInfo* NewInfo = (ThreadInfo*)malloc(sizeof(ThreadInfo));
 	RtlCopyMemory((UCHAR*)(&(NewInfo->devent)), (UCHAR*)CreateProcessEvent, sizeof(DEBUG_EVENT));
-
-
-
-
 	NewInfo->lpStartAddress = (LPTHREAD_START_ROUTINE)DumpEntryAddress((DWORD64)(CreateProcessEvent->u.CreateProcessInfo.lpBaseOfImage));
 	NewInfo->lpThreadLocalBase = NewInfo->devent.u.CreateProcessInfo.lpThreadLocalBase;
 
@@ -103,10 +100,43 @@ VOID WDebugerObject::ADDPROCESS(DEBUG_EVENT* CreateProcessEvent)
 	this->MainThreadid = (HANDLE)(CreateProcessEvent->dwThreadId);
 	this->ProcessInfo = NewInfo->devent.u.CreateProcessInfo;
 	this->ProcessInfo.lpStartAddress = NewInfo->lpStartAddress;
-	this->ProcessInfo.hProcess = UserOpenProcess(this->TargetPid, this->hDevice);
+	this->ProcessInfo.hProcess = this->ProcessHandle;
+	//this->ProcessHandle = this->ProcessInfo.hProcess;
 	this->ThreadInfoMaps[NewInfo->Tid] = NewInfo;
 	//LeaveCriticalSection(&(this->ThreadMapLock));
+	WCHAR buffer[256] = { 0 };
+	DWORD PathLen = GetFinalPathNameByHandleW(this->ProcessInfo.hFile, buffer, 256, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+	if (PathLen < 256)
+	{
+		//SUCCEED
+		DWORD LeftIndex = PathLen - 1;
+		while (buffer[LeftIndex] != L'\\' && LeftIndex >= 0)
+		{
+			LeftIndex--;
+		}
+		LeftIndex = LeftIndex + 1;
 
+		this->ProcessNameLen = PathLen - LeftIndex;
+		this->ProcessName = (WCHAR*)malloc(sizeof(WCHAR) * (this->ProcessNameLen + 1));
+		if (this->ProcessName == NULL)
+		{
+
+			this->ProcessNameLen = 0;
+		}
+		else {
+			memcpy(this->ProcessName, buffer + LeftIndex, sizeof(WCHAR) * (this->ProcessNameLen + 1));
+			this->ProcessName[this->ProcessNameLen] = 0x00;
+		}
+	}
+	else
+	{
+		this->ProcessNameLen = 0;
+	}
+	this->ImportDLLcounts= this->GetImportDllInformation((DWORD64)this->ProcessInfo.lpBaseOfImage,&this->MainModuleImportDLLtable);
+	if (this->AntiDetectionBits == TRUE)
+	{
+		this->AntiDetection_PatchIAT_ByMainModule(this->HookInformations.GetProcAddressHookAddress - 0x10);
+	}
 }
 
 
@@ -144,8 +174,8 @@ VOID WDebugerObject::DELETEPROCESS(HANDLE MainTid)
 
 VOID WDebugerObject::LOADDLL(DEBUG_EVENT* LoadDllEvent)
 {
-	PDLLRecordNode NewNode = (PDLLRecordNode)malloc(sizeof(DLLRecordNode));
-	if (NewNode==nullptr)
+	PDLLRecordNode NewNode = new DLLRecordNode();
+	if (NewNode == nullptr)
 	{
 		return;
 	}
@@ -165,8 +195,8 @@ VOID WDebugerObject::LOADDLL(DEBUG_EVENT* LoadDllEvent)
 		RtlZeroMemory(&(threadinfo->ThreadContext), sizeof(CONTEXT));
 	}
 
-	threadinfo->CurLookingRip = threadinfo->ThreadContext.Rip;
-	threadinfo->CurLookingRSP = threadinfo->ThreadContext.Rsp;
+	//threadinfo->CurLookingRip = threadinfo->ThreadContext.Rip;
+	//threadinfo->CurLookingRSP = threadinfo->ThreadContext.Rsp;
 
 	if (this->dllhead == NULL) {
 		NewNode->next = NULL;
@@ -200,20 +230,27 @@ VOID WDebugerObject::LOADDLL(DEBUG_EVENT* LoadDllEvent)
 			memcpy(NewNode->NameBufferPtr, buffer+LeftIndex, sizeof(WCHAR) * (NewNode->NameLen + 1));
 			NewNode->NameBufferPtr[NewNode->NameLen] = 0x00;
 		}
+		
 	}
 	else
 	{
 		NewNode->NameLen = 0;
 	}
 	//LeaveCriticalSection(&(this->ThreadMapLock));
+	
+	NewNode->ImportDLLcounts = this->GetImportDllInformation((DWORD64)NewNode->dllinfo.lpBaseOfDll, &NewNode->ImportDLLtable);
+	if (this->AntiDetectionBits==TRUE)
+	{
+		this->AntiDetection_PatchIAT_ByNode(NewNode, this->HookInformations.GetProcAddressHookAddress - 0x10);
+	}
 }
-
 
 VOID WDebugerObject::UNLOADDLL(DEBUG_EVENT* UnloadDllEvent)
 {
 	LPVOID hbase = UnloadDllEvent->u.UnloadDll.lpBaseOfDll;
 	PDLLRecordNode cur = this->dllhead;
 	PDLLRecordNode pre = NULL;
+
 	//EnterCriticalSection(&(this->ThreadMapLock));
 	while (cur != NULL) {
 		if (hbase == cur->dllinfo.lpBaseOfDll) {
@@ -225,8 +262,20 @@ VOID WDebugerObject::UNLOADDLL(DEBUG_EVENT* UnloadDllEvent)
 			{
 				pre->next = cur->next;
 			}
-			CloseHandle(cur->dllinfo.hFile);
-			free(cur);
+
+			if (cur->dllinfo.hFile != NULL)
+			{
+				CloseHandle(cur->dllinfo.hFile);
+				cur->dllinfo.hFile = NULL;
+			}
+
+			if (cur->NameBufferPtr != NULL)
+			{
+				free(cur->NameBufferPtr);
+				cur->NameBufferPtr = NULL;
+			}
+
+			delete cur;
 			break;
 		}
 		else
@@ -238,14 +287,12 @@ VOID WDebugerObject::UNLOADDLL(DEBUG_EVENT* UnloadDllEvent)
 	//LeaveCriticalSection(&(this->ThreadMapLock));
 }
 
-
-
 VOID WDebugerObject::EXCEPTIONRECORD(DEBUG_EVENT* ExceptionEvent)
 {
 	//EnterCriticalSection(&(this->ThreadMapLock));
 	PThreadInfo infoptr = this->ThreadInfoMaps[(HANDLE)ExceptionEvent->dwThreadId];
 	infoptr->devent = (*ExceptionEvent);
-	infoptr->CurLookingRip = (DWORD64)(infoptr->devent.u.Exception.ExceptionRecord.ExceptionAddress);
+	CurLookTid = (HANDLE)ExceptionEvent->dwThreadId;
 	//char buf[256];
 	
 	if (ExceptionEvent->u.Exception.ExceptionRecord.ExceptionCode==EXCEPTION_SINGLE_STEP&&infoptr->stepflag==StepReasonBreakpointRecovery) {
@@ -261,13 +308,12 @@ VOID WDebugerObject::EXCEPTIONRECORD(DEBUG_EVENT* ExceptionEvent)
 	{
 	}
 
-
-
+	
 	if (ExceptionEvent->u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT)
 	{
 		infoptr->ThreadContext.Rip -= 1;
 	}
-	
+	infoptr->CurLookingRip = (DWORD64)(infoptr->ThreadContext.Rip);
 	infoptr->CurLookingRSP = infoptr->ThreadContext.Rsp;
 	//LeaveCriticalSection(&(this->ThreadMapLock));
 }
@@ -753,7 +799,7 @@ VOID WDebugerObject::CLEANALLDLL()
 		cur = cur->next;
 		free(temp->NameBufferPtr);
 		CloseHandle(temp->dllinfo.hFile);
-		free(temp);
+		delete temp;
 	}
 	this->dllhead = NULL;
 	//LeaveCriticalSection(&(this->ThreadMapLock));

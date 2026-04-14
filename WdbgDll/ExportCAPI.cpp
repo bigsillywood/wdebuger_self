@@ -123,6 +123,24 @@ BOOL ContinueThreadC(HANDLE dbghandle,HANDLE ProcessId, HANDLE ThreadId)
     }
 }
 
+WDBGDLL_API BOOL UserAntiDetection(HANDLE TargetPid, HANDLE hDevice)
+{
+    struct AntiDetection_ARG args;
+    args.TargetPid = TargetPid;
+    size_t bytesRet = 0;
+    DWORD returnlen = 0;
+    BOOL dioOk = DeviceIoControl(hDevice,
+        IOCTL_ANTI_DETECTION,
+        &args,
+        sizeof(args),
+        &bytesRet,
+        sizeof(SIZE_T),
+        &returnlen, NULL);
+    return dioOk;
+}
+
+
+
 
 
 

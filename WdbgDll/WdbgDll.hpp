@@ -25,6 +25,7 @@
 #define OPEN_TARGET_PROCESS 0x804
 #define CREATE_TARGET_PROCESS 0X805
 #define OPEN_TARGET_THREAD 0x806
+#define ANTI_DETECTION 0X807
 
 #define IOCTL_CREATE_DEBUG_OBJ CTL_CODE(FILE_DEVICE_UNKNOWN,CREATE_DEBUG_OBJ,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_READ_PHYSICAL_MEM CTL_CODE(FILE_DEVICE_UNKNOWN,READ_PHYSICAL_MEM,METHOD_BUFFERED,FILE_ANY_ACCESS)
@@ -32,7 +33,7 @@
 #define IOCTL_OPEN_TARGET_PROCESS CTL_CODE(FILE_DEVICE_UNKNOWN,OPEN_TARGET_PROCESS,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_CREATE_TARGET_PROCESS CTL_CODE(FILE_DEVICE_UNKNOWN,CREATE_TARGET_PROCESS,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_OPEN_TARGET_THREAD CTL_CODE(FILE_DEVICE_UNKNOWN,OPEN_TARGET_THREAD,METHOD_BUFFERED,FILE_ANY_ACCESS)
-
+#define IOCTL_ANTI_DETECTION CTL_CODE(FILE_DEVICE_UNKNOWN,ANTI_DETECTION,METHOD_BUFFERED,FILE_ANY_ACCESS)
 
 struct CREATE_DEBUG_OBJ_ARG {
 	__in HANDLE DebugerPid;
@@ -57,6 +58,10 @@ struct OPEN_THREAD_ARG {
 	__in HANDLE Pid;
 	__in HANDLE Tid;
 };	
+struct AntiDetection_ARG {
+	__in HANDLE TargetPid;
+};
+
 
 enum THREAD_STEP_REASON {
 	StepReasonNone = 0,
@@ -80,15 +85,31 @@ typedef struct _ThreadInfo {
 	THREAD_STEP_REASON stepflag;
 }ThreadInfo,*PThreadInfo;
 
+typedef struct _ImportAPIinfo {
+	DWORD64 ImportAPITableEntryPtr;
+	DWORD64 ImportAPIAddress;
+}ImportAPIinfo,PImportAPIinfo;
+typedef struct _ImportModuleInfo{
+	std::unordered_map<std::string,ImportAPIinfo> ImportAPITable;
+	DWORD APIcounts;
+}ImportModuleInfo,PImportModuleInfo;
+
 typedef struct _DLLRecordNode {
 	_DLLRecordNode* next;
 	HANDLE LoadingThread;
 	LOAD_DLL_DEBUG_INFO dllinfo;
+	std::unordered_map<std::string,ImportModuleInfo> ImportDLLtable;
+	DWORD ImportDLLcounts;
 	WCHAR *NameBufferPtr;
 	DWORD NameLen;
 }DLLRecordNode,*PDLLRecordNode;
 
-
+typedef struct _AntiDetectHookFuncInformation {
+	DWORD64 NtQueryInformationHookAddress;
+	DWORD64 NtQueryInformationOriginalAddress;
+	DWORD64 GetProcAddressHookAddress;
+	DWORD64 GetProcAddressOriginalAddress;
+}AntiDetectHookFuncInformation,*PAntiDetectHookFuncInformation;
 
 typedef struct _OneInstructionRecord {
 	//instruction type
@@ -135,12 +156,16 @@ typedef struct _UnionCodeStruct {
 	//CRITICAL_SECTION CodeLock;
 	//BOOL CodeLockOk;
 	CapStonePageHandle CapstoneAPIhandle;
-	std::unordered_map<DWORD64, _PageInfor*>Pagelist;
+	std::unordered_map<DWORD64, _PageInfor*> Pagelist;
 	DWORD64 CurrentLookingPageStartAddress;
 	std::unordered_map<DWORD64,OneInstructionRecord*> Blist;
 }UnionCodeStruct,*PUnionCodeStruct;
 
-
+struct AntiDetectionFuncStruct {
+	UCHAR* FuncName;
+	UCHAR* StartAddress;
+	DWORD FuncLen;
+};
 
 class WDBGDLL_API WDebugerObject {
 private:
@@ -155,12 +180,15 @@ private:
 	HANDLE TargetPid;
 	HANDLE ProcessHandle;
 	HANDLE MainThreadid;
-
-
-	
+	WCHAR* ProcessName;
+	DWORD ProcessNameLen;
+	HANDLE CurLookTid;
+	BOOL AntiDetectionBits;
+	std::unordered_map<std::string, ImportModuleInfo> MainModuleImportDLLtable;
+	DWORD ImportDLLcounts;
 	CREATE_PROCESS_DEBUG_INFO ProcessInfo;
 	std::unordered_map <HANDLE , ThreadInfo*> ThreadInfoMaps;
-
+	AntiDetectHookFuncInformation HookInformations;
 
 
 	BOOL init();
@@ -187,12 +215,16 @@ private:
 	VOID FreePage(PageInfor *Page);
 	BOOL ContinueThreadLocked(HANDLE Tid);
 	DWORD64 DumpEntryAddress(DWORD64 imagebase);
-
-	
+	DWORD64 GetImportAPIInformation(PIMAGE_IMPORT_DESCRIPTOR ImportDllDescriptor,DWORD64 DllBase, std::unordered_map<std::string, ImportAPIinfo> *ImportAPITablePtr);
+	DWORD64 GetImportDllInformation(DWORD64 DllBase, std::unordered_map<std::string, ImportModuleInfo> *ImportDLLtable);
+	BOOL AntiDetection_InjectHookFunctions();
+	VOID AntiDetection_PatchIAT_ByNode(PDLLRecordNode node, DWORD64 GetProcBufBase);
+	VOID AntiDetection_PatchIAT_ByMainModule(DWORD64 GetProcBufBase);
+	VOID AntiDetection_PatchIAT();
 public:
 	WDebugerObject(HANDLE TargetPid);  
 	~WDebugerObject();
-	static std::unique_ptr<WDebugerObject> Create(HANDLE TargetPid);
+	static std::unique_ptr<WDebugerObject> Create(HANDLE TargetPid,BOOL isAntiDetect);
 	BOOL GetThreadList(HANDLE *Tidbuffer,DWORD buffersize);
 	BOOL ContinueThread(HANDLE Tid);
 
@@ -221,10 +253,11 @@ public:
 	BOOL StepIntoOneStep(HANDLE Tid);
 	BOOL StepOverOneStep(HANDLE Tid);
 
-
+	HANDLE GetCurLookTid();
 	//this function will get the import Table Entry Address for hooking
 	DWORD64 GetImportAPIAddressPtrByName(WCHAR *SpaceDllName,CHAR *ImportDllName,CHAR* APIName);
-
+	VOID AntiDetection();
+	VOID AntiDetection_Force();
 	//this function will get the export Tabel Enrtry Address for hooking
 	DWORD64 GetExportAPIAddressPtrByName(WCHAR *DllName,CHAR* APIName);
 };
@@ -253,8 +286,10 @@ extern "C" WDBGDLL_API HANDLE UserOpenThread(__in HANDLE TargetPid,__in HANDLE T
 extern "C" WDBGDLL_API BOOL RemoveHandles(PVOID dbgreserve_0, int threadid, int processid);
 extern "C" WDBGDLL_API BOOL ContinueThreadC(HANDLE dbghandle,HANDLE ProcessId,HANDLE ThreadId);
 
-
-
+extern "C" WDBGDLL_API BOOL UserAntiDetection (__in HANDLE TargetPid,
+											  __in HANDLE hDevice);
+ 
+ 
 
 void OutputErrorCode(DWORD errcode);
 LONG GetDbgReserveOffsetFirst();

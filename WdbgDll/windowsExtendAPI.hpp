@@ -48,4 +48,9 @@ DbgUiConvertStateChangeStructureEx(
     PDBGUI_WAIT_STATE_CHANGE WaitStateChange,
     DEBUG_EVENT* DebugEvent
 );
+
+extern "C" UCHAR NtQueryInformationProcessDebugHook_begin;
+extern "C" UCHAR NtQueryInformationProcessDebugHook_end;
+extern "C" UCHAR GetProcAddressHook_begin;
+extern "C" UCHAR GetProcAddressHook_end;
 BOOL WaitForDebugEventSelf(DEBUG_EVENT* PDebugEvent, INT waitmiliseconds);

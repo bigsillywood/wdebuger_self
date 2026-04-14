@@ -15,12 +15,13 @@ WDebugerObject::WDebugerObject(HANDLE TargetPid)
 	this->isLockOk = FALSE;
 	this->CodeStruct.CurrentLookingPageStartAddress = NULL;
 	RtlZeroMemory(&(this->ProcessInfo),sizeof(CREATE_PROCESS_DEBUG_INFO));
+	RtlZeroMemory(&(this->HookInformations),sizeof(AntiDetectHookFuncInformation));
 }
 
 WDebugerObject::~WDebugerObject()
 {
 	this->islisten=FALSE;
-	
+	free(this->ProcessName);
 	OneInstructionRecord* TempInsPtr;
 	for (auto  it = this->CodeStruct.Blist.begin(); it!=this->CodeStruct.Blist.end(); it++)
 	{
@@ -82,12 +83,20 @@ WDebugerObject::~WDebugerObject()
 }
 
 
-std::unique_ptr<WDebugerObject> WDebugerObject::Create(HANDLE TargetPid)
+std::unique_ptr<WDebugerObject> WDebugerObject::Create(HANDLE TargetPid,BOOL isAntiDetect)
 {
 	std::unique_ptr<WDebugerObject> ptr(new WDebugerObject(TargetPid));
 	if (!(ptr->init())) {
 		return nullptr;
 	}
+	ptr->ProcessHandle = UserOpenProcess(ptr->TargetPid, ptr->hDevice);
+	if (isAntiDetect) {
+		UserAntiDetection(ptr->TargetPid,ptr->hDevice );
+		if (ptr->AntiDetection_InjectHookFunctions()) {
+			ptr->AntiDetectionBits = TRUE;
+		}
+	}
+	
 	return ptr;
 }
 BOOL WDebugerObject::GetThreadList(HANDLE* Tidbuffer, DWORD buffersize)
@@ -673,51 +682,11 @@ HANDLE WDebugerObject::GetDebugProcessHandle()
 
 BOOL WDebugerObject::ReadPhysicalMem(UCHAR* readbuffer, size_t readsize,ULONG64 VirtualAddr)
 {
-	if (VirtualAddr == 0) {
-		//printf("[PhysMem] ReadPhysicalMem: rejected NULL address\n");
-		return FALSE;
-	}
-	if (VirtualAddr < 0x10000ULL) {
-		//printf("[PhysMem] ReadPhysicalMem: rejected low address 0x%llX (NULL region)\n", VirtualAddr);
-		return FALSE;
-	}
-	if (VirtualAddr > 0x7FFFFFFFFFFFULL) {
-		//printf("[PhysMem] ReadPhysicalMem: rejected kernel address 0x%llX\n", VirtualAddr);
-		return FALSE;
-	}
-	if (readbuffer == nullptr) {
-		//printf("[PhysMem] ReadPhysicalMem: rejected NULL buffer\n");
-		return FALSE;
-	}
-	if (readsize == 0 || readsize > 0x10000000ULL) { // 最大单次读256MB，防越界
-		//printf("[PhysMem] ReadPhysicalMem: rejected invalid size %zu\n", readsize);
-		return FALSE;
-	}
 	return UserPhysicalRead(this->TargetPid,this->hDevice,VirtualAddr,readsize,readbuffer);
 }
 
 BOOL WDebugerObject::WritePhysicalMem(UCHAR* writebuffer, size_t writesize, ULONG64 VirtualAddr)
 {
-	if (VirtualAddr == 0) {
-		//printf("[PhysMem] WritePhysicalMem: rejected NULL address\n");
-		return FALSE;
-	}
-	if (VirtualAddr < 0x10000ULL) {
-		//printf("[PhysMem] WritePhysicalMem: rejected low address 0x%llX\n", VirtualAddr);
-		return FALSE;
-	}
-	if (VirtualAddr > 0x7FFFFFFFFFFFULL) {
-		//printf("[PhysMem] WritePhysicalMem: rejected kernel address 0x%llX\n", VirtualAddr);
-		return FALSE;
-	}
-	if (writebuffer == nullptr) {
-		//printf("[PhysMem] WritePhysicalMem: rejected NULL buffer\n");
-		return FALSE;
-	}
-	if (writesize == 0 || writesize > 0x1000000ULL) { // 写操作限制更严，最大16MB
-		//printf("[PhysMem] WritePhysicalMem: rejected invalid size %zu\n", writesize);
-		return FALSE;
-	}
 	return UserPhysicalWrite(this->TargetPid,this->hDevice,VirtualAddr,writesize,writebuffer);
 }
 
@@ -771,6 +740,15 @@ BOOL WDebugerObject::StepOverOneStep(HANDLE Tid)
 
 	LeaveCriticalSection(&this->WdbgLock);
 	return TRUE;
+}
+
+HANDLE WDebugerObject::GetCurLookTid()
+{
+	HANDLE tid = NULL;
+	EnterCriticalSection(&this->WdbgLock);
+	tid = this->CurLookTid;
+	LeaveCriticalSection(&this->WdbgLock);
+	return tid;
 }
 
 BOOL WDebugerObject::StepIntoOneStep(HANDLE Tid) {
