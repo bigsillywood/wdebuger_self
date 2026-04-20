@@ -1,208 +1,489 @@
 #include"WdbgDll.hpp"
 
-
-
-
-
 BOOL WDebugerObject::AntiDetection_InjectHookFunctions()
 {
-    CHAR debugbuf[256];
+    CHAR debugbuf[256] = { 0 };
+    SIZE_T writesize = 0;
+    BYTE dummy = 0x90;
 
-    // ── NtQueryInformationProcess Hook ──
-    DWORD NtQueryFuncLen = (DWORD)((&NtQueryInformationProcessDebugHook_end)
-        - (&NtQueryInformationProcessDebugHook_begin));
+    auto CleanupRemote = [&](LPVOID addr)
+    {
+        if (addr) VirtualFreeEx(this->ProcessHandle, addr, 0, MEM_RELEASE);
+    };
 
-    LPVOID NtQueryHookAddress = VirtualAllocEx(this->ProcessHandle, NULL,
+    // =========================================================
+    // 1) NtQueryInformationProcess hook
+    // layout:
+    //   [PROC...]
+    // entry = base + NTQUERY_HOOK_ENTRY_OFFSET
+    // =========================================================
+    DWORD NtQueryFuncLen =
+        (DWORD)((ULONG_PTR)&NtQueryInformationProcessDebugHook_end -
+            (ULONG_PTR)&NtQueryInformationProcessDebugHook_begin);
+
+    LPVOID NtQueryHookRemote = VirtualAllocEx(
+        this->ProcessHandle,
+        NULL,
         NtQueryFuncLen,
         MEM_COMMIT | MEM_RESERVE,
         PAGE_EXECUTE_READWRITE);
-    if (NtQueryHookAddress == NULL)
+
+    if (!NtQueryHookRemote)
     {
         sprintf_s(debugbuf, sizeof(debugbuf),
-            "[InjectHook] VirtualAllocEx NtQuery failed, code=%d\n", GetLastError());
+            "[InjectHook] VirtualAllocEx NtQueryInformationProcess failed, code=%lu\n",
+            GetLastError());
         OutputDebugStringA(debugbuf);
         return FALSE;
     }
 
-    SIZE_T writesize = 0;
-    BYTE dummy = 0x90;
-    WriteProcessMemory(this->ProcessHandle, NtQueryHookAddress, &dummy, 1, &writesize);
+    WriteProcessMemory(this->ProcessHandle, NtQueryHookRemote, &dummy, 1, &writesize);
 
     UCHAR* NtQueryBuf = (UCHAR*)malloc(NtQueryFuncLen);
     if (!NtQueryBuf)
     {
-        VirtualFreeEx(this->ProcessHandle, NtQueryHookAddress, 0, MEM_RELEASE);
+        CleanupRemote(NtQueryHookRemote);
         return FALSE;
     }
+
     memcpy(NtQueryBuf, &NtQueryInformationProcessDebugHook_begin, NtQueryFuncLen);
-    this->WritePhysicalMem(NtQueryBuf, NtQueryFuncLen, (DWORD64)NtQueryHookAddress);
-    FlushInstructionCache(this->ProcessHandle, NtQueryHookAddress, NtQueryFuncLen);
+    this->WritePhysicalMem(NtQueryBuf, NtQueryFuncLen, (DWORD64)NtQueryHookRemote);
+    FlushInstructionCache(this->ProcessHandle, NtQueryHookRemote, NtQueryFuncLen);
     free(NtQueryBuf);
 
-    this->HookInformations.NtQueryInformationHookAddress = (DWORD64)NtQueryHookAddress;
-    this->HookInformations.NtQueryInformationOriginalAddress = 0; // 第二步动态填
+    this->HookInformations.NtQueryInformationHookAddress =
+        (DWORD64)NtQueryHookRemote + NTQUERY_HOOK_ENTRY_OFFSET;
+    this->HookInformations.NtQueryInformationOriginalAddress = 0;
 
     sprintf_s(debugbuf, sizeof(debugbuf),
-        "[InjectHook] NtQuery hook injected at %p\n", NtQueryHookAddress);
+        "[InjectHook] NtQueryInformationProcess hook injected at %p\n",
+        NtQueryHookRemote);
     OutputDebugStringA(debugbuf);
 
-    // ── GetProcAddress Hook ──
-    DWORD GetProcFuncLen = (DWORD)((&GetProcAddressHook_end)
-        - (&GetProcAddressHook_begin));
+    // =========================================================
+    // 2) OutputDebugString hook
+    // layout:
+    //   [PROC ret]
+    // entry = base + OUTPUTDEBUGSTRING_HOOK_ENTRY_OFFSET
+    // =========================================================
+    DWORD OutDbgFuncLen =
+        (DWORD)((ULONG_PTR)&OutputDebugStringhook_end -
+            (ULONG_PTR)&OutputDebugStringHook_begin);
 
-    LPVOID GetProcHookAddress = VirtualAllocEx(this->ProcessHandle, NULL,
+    LPVOID OutDbgHookRemote = VirtualAllocEx(
+        this->ProcessHandle,
+        NULL,
+        OutDbgFuncLen,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE);
+
+    if (!OutDbgHookRemote)
+    {
+        sprintf_s(debugbuf, sizeof(debugbuf),
+            "[InjectHook] VirtualAllocEx OutputDebugString hook failed, code=%lu\n",
+            GetLastError());
+        OutputDebugStringA(debugbuf);
+
+        CleanupRemote(NtQueryHookRemote);
+        ZeroMemory(&this->HookInformations, sizeof(this->HookInformations));
+        return FALSE;
+    }
+
+    WriteProcessMemory(this->ProcessHandle, OutDbgHookRemote, &dummy, 1, &writesize);
+
+    UCHAR* OutDbgBuf = (UCHAR*)malloc(OutDbgFuncLen);
+    if (!OutDbgBuf)
+    {
+        CleanupRemote(OutDbgHookRemote);
+        CleanupRemote(NtQueryHookRemote);
+        ZeroMemory(&this->HookInformations, sizeof(this->HookInformations));
+        return FALSE;
+    }
+
+    memcpy(OutDbgBuf, &OutputDebugStringHook_begin, OutDbgFuncLen);
+    this->WritePhysicalMem(OutDbgBuf, OutDbgFuncLen, (DWORD64)OutDbgHookRemote);
+    FlushInstructionCache(this->ProcessHandle, OutDbgHookRemote, OutDbgFuncLen);
+    free(OutDbgBuf);
+
+    this->HookInformations.OutputDebugStringHookAddress =
+        (DWORD64)OutDbgHookRemote + OUTPUTDEBUGSTRING_HOOK_ENTRY_OFFSET;
+    this->HookInformations.OutputDebugStringAOrignalAddress = 0;
+    this->HookInformations.OutputDebugStringWOrignalAddress = 0;
+
+    sprintf_s(debugbuf, sizeof(debugbuf),
+        "[InjectHook] OutputDebugString hook injected at %p\n",
+        OutDbgHookRemote);
+    OutputDebugStringA(debugbuf);
+
+    // =========================================================
+    // 3) NtSetInformationThread hook
+    // layout:
+    //   +NTSETINFO_HOOK_ORIGINAL_OFFSET dq NtSetInformationThread_original
+    //   +NTSETINFO_HOOK_ENTRY_OFFSET    PROC ...
+    // =========================================================
+    DWORD NtSetInfoThreadFuncLen =
+        (DWORD)((ULONG_PTR)&NtSetInformationThreadHook_end -
+            (ULONG_PTR)&NtSetInformationThreadHook_begin);
+
+    LPVOID NtSetInfoThreadRemote = VirtualAllocEx(
+        this->ProcessHandle,
+        NULL,
+        NtSetInfoThreadFuncLen,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE);
+
+    if (!NtSetInfoThreadRemote)
+    {
+        sprintf_s(debugbuf, sizeof(debugbuf),
+            "[InjectHook] VirtualAllocEx NtSetInformationThread hook failed, code=%lu\n",
+            GetLastError());
+        OutputDebugStringA(debugbuf);
+
+        CleanupRemote(OutDbgHookRemote);
+        CleanupRemote(NtQueryHookRemote);
+        ZeroMemory(&this->HookInformations, sizeof(this->HookInformations));
+        return FALSE;
+    }
+
+    WriteProcessMemory(this->ProcessHandle, NtSetInfoThreadRemote, &dummy, 1, &writesize);
+
+    UCHAR* NtSetInfoThreadBuf = (UCHAR*)malloc(NtSetInfoThreadFuncLen);
+    if (!NtSetInfoThreadBuf)
+    {
+        CleanupRemote(NtSetInfoThreadRemote);
+        CleanupRemote(OutDbgHookRemote);
+        CleanupRemote(NtQueryHookRemote);
+        ZeroMemory(&this->HookInformations, sizeof(this->HookInformations));
+        return FALSE;
+    }
+
+    memcpy(NtSetInfoThreadBuf, &NtSetInformationThreadHook_begin, NtSetInfoThreadFuncLen);
+
+    {
+        DWORD64 NullAddr = 0;
+        memcpy(NtSetInfoThreadBuf + NTSETINFO_HOOK_ORIGINAL_OFFSET, &NullAddr, sizeof(DWORD64));
+    }
+
+    this->WritePhysicalMem(NtSetInfoThreadBuf, NtSetInfoThreadFuncLen, (DWORD64)NtSetInfoThreadRemote);
+    FlushInstructionCache(this->ProcessHandle, NtSetInfoThreadRemote, NtSetInfoThreadFuncLen);
+    free(NtSetInfoThreadBuf);
+
+    this->HookInformations.NtSetInformationThreadHookAddress =
+        (DWORD64)NtSetInfoThreadRemote + NTSETINFO_HOOK_ENTRY_OFFSET;
+    this->HookInformations.NtSetInformationThreadOriginalAddress = 0;
+
+    sprintf_s(debugbuf, sizeof(debugbuf),
+        "[InjectHook] NtSetInformationThread hook injected at %p (entry=+0x%llX)\n",
+        NtSetInfoThreadRemote,
+        (unsigned long long)NTSETINFO_HOOK_ENTRY_OFFSET);
+    OutputDebugStringA(debugbuf);
+
+    // =========================================================
+    // 4) GetProcAddress hook
+    // layout:
+    //   +GETPROC_HOOK_NTQUERY_RET_OFFSET     NtQueryInformationProcess hook address
+    //   +GETPROC_HOOK_NTSETINFO_RET_OFFSET   NtSetInformationThread hook address
+    //   +GETPROC_HOOK_OUTPUTDEBUG_RET_OFFSET OutputDebugString hook address
+    //   +GETPROC_HOOK_ORIGINAL_OFFSET        original GetProcAddress
+    //   +GETPROC_HOOK_ENTRY_OFFSET           PROC ...
+    // =========================================================
+    DWORD GetProcFuncLen =
+        (DWORD)((ULONG_PTR)&GetProcAddressHook_end -
+            (ULONG_PTR)&GetProcAddressHook_begin);
+
+    LPVOID GetProcHookRemote = VirtualAllocEx(
+        this->ProcessHandle,
+        NULL,
         GetProcFuncLen,
         MEM_COMMIT | MEM_RESERVE,
         PAGE_EXECUTE_READWRITE);
-    if (GetProcHookAddress == NULL)
+
+    if (!GetProcHookRemote)
     {
         sprintf_s(debugbuf, sizeof(debugbuf),
-            "[InjectHook] VirtualAllocEx GetProcAddress failed, code=%d\n", GetLastError());
+            "[InjectHook] VirtualAllocEx GetProcAddress hook failed, code=%lu\n",
+            GetLastError());
         OutputDebugStringA(debugbuf);
-        VirtualFreeEx(this->ProcessHandle, NtQueryHookAddress, 0, MEM_RELEASE);
-        this->HookInformations.NtQueryInformationHookAddress = 0;
+
+        CleanupRemote(NtSetInfoThreadRemote);
+        CleanupRemote(OutDbgHookRemote);
+        CleanupRemote(NtQueryHookRemote);
+        ZeroMemory(&this->HookInformations, sizeof(this->HookInformations));
         return FALSE;
     }
 
-    WriteProcessMemory(this->ProcessHandle, GetProcHookAddress, &dummy, 1, &writesize);
+    WriteProcessMemory(this->ProcessHandle, GetProcHookRemote, &dummy, 1, &writesize);
 
     UCHAR* GetProcBuf = (UCHAR*)malloc(GetProcFuncLen);
     if (!GetProcBuf)
     {
-        VirtualFreeEx(this->ProcessHandle, NtQueryHookAddress, 0, MEM_RELEASE);
-        VirtualFreeEx(this->ProcessHandle, GetProcHookAddress, 0, MEM_RELEASE);
-        this->HookInformations.NtQueryInformationHookAddress = 0;
+        CleanupRemote(GetProcHookRemote);
+        CleanupRemote(NtSetInfoThreadRemote);
+        CleanupRemote(OutDbgHookRemote);
+        CleanupRemote(NtQueryHookRemote);
+        ZeroMemory(&this->HookInformations, sizeof(this->HookInformations));
         return FALSE;
     }
+
     memcpy(GetProcBuf, &GetProcAddressHook_begin, GetProcFuncLen);
 
-    // +0x00 : NtQueryInformationProcess Hook 起始地址
-    // +0x08 : 原始 GetProcAddress 地址，暂填 0，第二步动态回填
-    DWORD64 NtQueryHookAddr64 = (DWORD64)NtQueryHookAddress;
-    DWORD64 NullAddr = 0;
-    memcpy(GetProcBuf + 0x00, &NtQueryHookAddr64, sizeof(DWORD64));
-    memcpy(GetProcBuf + 0x08, &NullAddr, sizeof(DWORD64));
+    {
+        DWORD64 NtQueryHookEntry = this->HookInformations.NtQueryInformationHookAddress;
+        DWORD64 NtSetInfoThreadEntry = this->HookInformations.NtSetInformationThreadHookAddress;
+        DWORD64 OutputDebugStringEntry = this->HookInformations.OutputDebugStringHookAddress;
+        DWORD64 GetProcOriginal = 0;
 
-    this->WritePhysicalMem(GetProcBuf, GetProcFuncLen, (DWORD64)GetProcHookAddress);
-    FlushInstructionCache(this->ProcessHandle, GetProcHookAddress, GetProcFuncLen);
+        memcpy(GetProcBuf + GETPROC_HOOK_NTQUERY_RET_OFFSET, &NtQueryHookEntry, sizeof(DWORD64));
+        memcpy(GetProcBuf + GETPROC_HOOK_NTSETINFO_RET_OFFSET, &NtSetInfoThreadEntry, sizeof(DWORD64));
+        memcpy(GetProcBuf + GETPROC_HOOK_OUTPUTDEBUG_RET_OFFSET, &OutputDebugStringEntry, sizeof(DWORD64));
+        memcpy(GetProcBuf + GETPROC_HOOK_ORIGINAL_OFFSET, &GetProcOriginal, sizeof(DWORD64));
+    }
+
+    this->WritePhysicalMem(GetProcBuf, GetProcFuncLen, (DWORD64)GetProcHookRemote);
+    FlushInstructionCache(this->ProcessHandle, GetProcHookRemote, GetProcFuncLen);
     free(GetProcBuf);
 
-    // +0x10 才是函数体起始，IAT 写这个地址
-    this->HookInformations.GetProcAddressHookAddress = (DWORD64)GetProcHookAddress + 0x10;
-    this->HookInformations.GetProcAddressOriginalAddress = 0; // 第二步动态填
+    this->HookInformations.GetProcAddressHookAddress =
+        (DWORD64)GetProcHookRemote + GETPROC_HOOK_ENTRY_OFFSET;
+    this->HookInformations.GetProcAddressOriginalAddress = 0;
 
     sprintf_s(debugbuf, sizeof(debugbuf),
-        "[InjectHook] GetProcAddress hook injected at %p (entry=+0x10)\n", GetProcHookAddress);
+        "[InjectHook] GetProcAddress hook injected at %p (entry=+0x%llX)\n",
+        GetProcHookRemote,
+        (unsigned long long)GETPROC_HOOK_ENTRY_OFFSET);
     OutputDebugStringA(debugbuf);
 
     return TRUE;
 }
 
 
-// ── 子方法1：对单个 DLLRecordNode 挂 hook ──
 VOID WDebugerObject::AntiDetection_PatchIAT_ByNode(PDLLRecordNode node, DWORD64 GetProcBufBase)
 {
     const std::string Ntdllstr = "ntdll.dll";
     const std::string Kernel32str = "kernel32.dll";
+
     const std::string NtQueryAPIstr = "NtQueryInformationProcess";
+    const std::string NtSetInfoAPI = "NtSetInformationThread";
     const std::string GetProcAPIstr = "GetProcAddress";
+    const std::string OutDbgAAPI = "OutputDebugStringA";
+    const std::string OutDbgWAPI = "OutputDebugStringW";
 
     DWORD64 NtQueryIATValue = this->HookInformations.NtQueryInformationHookAddress;
+    DWORD64 NtSetInfoIATValue = this->HookInformations.NtSetInformationThreadHookAddress;
     DWORD64 GetProcIATValue = this->HookInformations.GetProcAddressHookAddress;
+    DWORD64 OutDbgIATValue = this->HookInformations.OutputDebugStringHookAddress;
 
-    // NtQueryInformationProcess
-    auto DllIt = node->ImportDLLtable.find(Ntdllstr);
-    if (DllIt != node->ImportDLLtable.end())
+    auto NtdllIt = node->ImportDLLtable.find(Ntdllstr);
+    if (NtdllIt != node->ImportDLLtable.end())
     {
-        auto APIIt = DllIt->second.ImportAPITable.find(NtQueryAPIstr);
-        if (APIIt != DllIt->second.ImportAPITable.end())
+        auto& apiTable = NtdllIt->second.ImportAPITable;
+
+        auto NtQueryIt = apiTable.find(NtQueryAPIstr);
+        if (NtQueryIt != apiTable.end())
         {
-            auto& ainfor = APIIt->second;
+            auto& ainfor = NtQueryIt->second;
             if (this->HookInformations.NtQueryInformationOriginalAddress == 0)
                 this->HookInformations.NtQueryInformationOriginalAddress = ainfor.ImportAPIAddress;
-            this->WritePhysicalMem((UCHAR*)&NtQueryIATValue, sizeof(DWORD64),
+
+            this->WritePhysicalMem(
+                (UCHAR*)&NtQueryIATValue,
+                sizeof(DWORD64),
+                ainfor.ImportAPITableEntryPtr);
+        }
+
+        auto NtSetInfoIt = apiTable.find(NtSetInfoAPI);
+        if (NtSetInfoIt != apiTable.end())
+        {
+            auto& ainfor = NtSetInfoIt->second;
+            if (this->HookInformations.NtSetInformationThreadOriginalAddress == 0)
+            {
+                this->HookInformations.NtSetInformationThreadOriginalAddress = ainfor.ImportAPIAddress;
+
+                DWORD64 OrigAddr = ainfor.ImportAPIAddress;
+                this->WritePhysicalMem(
+                    (UCHAR*)&OrigAddr,
+                    sizeof(DWORD64),
+                    this->HookInformations.NtSetInformationThreadHookAddress - NTSETINFO_HOOK_ENTRY_OFFSET + NTSETINFO_HOOK_ORIGINAL_OFFSET);
+            }
+
+            this->WritePhysicalMem(
+                (UCHAR*)&NtSetInfoIATValue,
+                sizeof(DWORD64),
                 ainfor.ImportAPITableEntryPtr);
         }
     }
 
-    // GetProcAddress
-    auto DllIt2 = node->ImportDLLtable.find(Kernel32str);
-    if (DllIt2 != node->ImportDLLtable.end())
+    auto K32It = node->ImportDLLtable.find(Kernel32str);
+    if (K32It != node->ImportDLLtable.end())
     {
-        auto APIIt2 = DllIt2->second.ImportAPITable.find(GetProcAPIstr);
-        if (APIIt2 != DllIt2->second.ImportAPITable.end())
+        auto& apiTable = K32It->second.ImportAPITable;
+
+        auto GetProcIt = apiTable.find(GetProcAPIstr);
+        if (GetProcIt != apiTable.end())
         {
-            auto& ainfor2 = APIIt2->second;
+            auto& ainfor = GetProcIt->second;
             if (this->HookInformations.GetProcAddressOriginalAddress == 0)
             {
-                this->HookInformations.GetProcAddressOriginalAddress = ainfor2.ImportAPIAddress;
-                DWORD64 OrigAddr = ainfor2.ImportAPIAddress;
-                this->WritePhysicalMem((UCHAR*)&OrigAddr, sizeof(DWORD64),
-                    GetProcBufBase + 0x08);
+                this->HookInformations.GetProcAddressOriginalAddress = ainfor.ImportAPIAddress;
+
+                DWORD64 OrigAddr = ainfor.ImportAPIAddress;
+                this->WritePhysicalMem(
+                    (UCHAR*)&OrigAddr,
+                    sizeof(DWORD64),
+                    GetProcBufBase + GETPROC_HOOK_ORIGINAL_OFFSET);
             }
-            this->WritePhysicalMem((UCHAR*)&GetProcIATValue, sizeof(DWORD64),
-                ainfor2.ImportAPITableEntryPtr);
+
+            this->WritePhysicalMem(
+                (UCHAR*)&GetProcIATValue,
+                sizeof(DWORD64),
+                ainfor.ImportAPITableEntryPtr);
+        }
+
+        auto OutDbgAIt = apiTable.find(OutDbgAAPI);
+        if (OutDbgAIt != apiTable.end())
+        {
+            auto& ainfor = OutDbgAIt->second;
+            if (this->HookInformations.OutputDebugStringAOrignalAddress == 0)
+                this->HookInformations.OutputDebugStringAOrignalAddress = ainfor.ImportAPIAddress;
+
+            this->WritePhysicalMem(
+                (UCHAR*)&OutDbgIATValue,
+                sizeof(DWORD64),
+                ainfor.ImportAPITableEntryPtr);
+        }
+
+        auto OutDbgWIt = apiTable.find(OutDbgWAPI);
+        if (OutDbgWIt != apiTable.end())
+        {
+            auto& ainfor = OutDbgWIt->second;
+            if (this->HookInformations.OutputDebugStringWOrignalAddress == 0)
+                this->HookInformations.OutputDebugStringWOrignalAddress = ainfor.ImportAPIAddress;
+
+            this->WritePhysicalMem(
+                (UCHAR*)&OutDbgIATValue,
+                sizeof(DWORD64),
+                ainfor.ImportAPITableEntryPtr);
         }
     }
 }
 
 
-// ── 子方法2：对主模块 ImportDLLtable 挂 hook ──
 VOID WDebugerObject::AntiDetection_PatchIAT_ByMainModule(DWORD64 GetProcBufBase)
 {
     const std::string Ntdllstr = "ntdll.dll";
     const std::string Kernel32str = "kernel32.dll";
+
     const std::string NtQueryAPIstr = "NtQueryInformationProcess";
+    const std::string NtSetInfoAPI = "NtSetInformationThread";
     const std::string GetProcAPIstr = "GetProcAddress";
+    const std::string OutDbgAAPI = "OutputDebugStringA";
+    const std::string OutDbgWAPI = "OutputDebugStringW";
 
     DWORD64 NtQueryIATValue = this->HookInformations.NtQueryInformationHookAddress;
+    DWORD64 NtSetInfoIATValue = this->HookInformations.NtSetInformationThreadHookAddress;
     DWORD64 GetProcIATValue = this->HookInformations.GetProcAddressHookAddress;
+    DWORD64 OutDbgIATValue = this->HookInformations.OutputDebugStringHookAddress;
 
-    // NtQueryInformationProcess
     auto MainNtDllIt = this->MainModuleImportDLLtable.find(Ntdllstr);
     if (MainNtDllIt != this->MainModuleImportDLLtable.end())
     {
-        auto APIIt = MainNtDllIt->second.ImportAPITable.find(NtQueryAPIstr);
-        if (APIIt != MainNtDllIt->second.ImportAPITable.end())
+        auto& apiTable = MainNtDllIt->second.ImportAPITable;
+
+        auto NtQueryIt = apiTable.find(NtQueryAPIstr);
+        if (NtQueryIt != apiTable.end())
         {
-            auto& ainfor = APIIt->second;
+            auto& ainfor = NtQueryIt->second;
             if (this->HookInformations.NtQueryInformationOriginalAddress == 0)
                 this->HookInformations.NtQueryInformationOriginalAddress = ainfor.ImportAPIAddress;
-            this->WritePhysicalMem((UCHAR*)&NtQueryIATValue, sizeof(DWORD64),
+
+            this->WritePhysicalMem(
+                (UCHAR*)&NtQueryIATValue,
+                sizeof(DWORD64),
+                ainfor.ImportAPITableEntryPtr);
+        }
+
+        auto NtSetInfoIt = apiTable.find(NtSetInfoAPI);
+        if (NtSetInfoIt != apiTable.end())
+        {
+            auto& ainfor = NtSetInfoIt->second;
+            if (this->HookInformations.NtSetInformationThreadOriginalAddress == 0)
+            {
+                this->HookInformations.NtSetInformationThreadOriginalAddress = ainfor.ImportAPIAddress;
+
+                DWORD64 OrigAddr = ainfor.ImportAPIAddress;
+                this->WritePhysicalMem(
+                    (UCHAR*)&OrigAddr,
+                    sizeof(DWORD64),
+                    this->HookInformations.NtSetInformationThreadHookAddress - NTSETINFO_HOOK_ENTRY_OFFSET + NTSETINFO_HOOK_ORIGINAL_OFFSET);
+            }
+
+            this->WritePhysicalMem(
+                (UCHAR*)&NtSetInfoIATValue,
+                sizeof(DWORD64),
                 ainfor.ImportAPITableEntryPtr);
         }
     }
 
-    // GetProcAddress
     auto MainK32It = this->MainModuleImportDLLtable.find(Kernel32str);
     if (MainK32It != this->MainModuleImportDLLtable.end())
     {
-        auto APIIt2 = MainK32It->second.ImportAPITable.find(GetProcAPIstr);
-        if (APIIt2 != MainK32It->second.ImportAPITable.end())
+        auto& apiTable = MainK32It->second.ImportAPITable;
+
+        auto GetProcIt = apiTable.find(GetProcAPIstr);
+        if (GetProcIt != apiTable.end())
         {
-            auto& ainfor2 = APIIt2->second;
+            auto& ainfor = GetProcIt->second;
             if (this->HookInformations.GetProcAddressOriginalAddress == 0)
             {
-                this->HookInformations.GetProcAddressOriginalAddress = ainfor2.ImportAPIAddress;
-                DWORD64 OrigAddr = ainfor2.ImportAPIAddress;
-                this->WritePhysicalMem((UCHAR*)&OrigAddr, sizeof(DWORD64),
-                    GetProcBufBase + 0x08);
+                this->HookInformations.GetProcAddressOriginalAddress = ainfor.ImportAPIAddress;
+
+                DWORD64 OrigAddr = ainfor.ImportAPIAddress;
+                this->WritePhysicalMem(
+                    (UCHAR*)&OrigAddr,
+                    sizeof(DWORD64),
+                    GetProcBufBase + GETPROC_HOOK_ORIGINAL_OFFSET);
             }
-            this->WritePhysicalMem((UCHAR*)&GetProcIATValue, sizeof(DWORD64),
-                APIIt2->second.ImportAPITableEntryPtr);
+
+            this->WritePhysicalMem(
+                (UCHAR*)&GetProcIATValue,
+                sizeof(DWORD64),
+                ainfor.ImportAPITableEntryPtr);
+        }
+
+        auto OutDbgAIt = apiTable.find(OutDbgAAPI);
+        if (OutDbgAIt != apiTable.end())
+        {
+            auto& ainfor = OutDbgAIt->second;
+            if (this->HookInformations.OutputDebugStringAOrignalAddress == 0)
+                this->HookInformations.OutputDebugStringAOrignalAddress = ainfor.ImportAPIAddress;
+
+            this->WritePhysicalMem(
+                (UCHAR*)&OutDbgIATValue,
+                sizeof(DWORD64),
+                ainfor.ImportAPITableEntryPtr);
+        }
+
+        auto OutDbgWIt = apiTable.find(OutDbgWAPI);
+        if (OutDbgWIt != apiTable.end())
+        {
+            auto& ainfor = OutDbgWIt->second;
+            if (this->HookInformations.OutputDebugStringWOrignalAddress == 0)
+                this->HookInformations.OutputDebugStringWOrignalAddress = ainfor.ImportAPIAddress;
+
+            this->WritePhysicalMem(
+                (UCHAR*)&OutDbgIATValue,
+                sizeof(DWORD64),
+                ainfor.ImportAPITableEntryPtr);
         }
     }
 }
 
 
-// ── 子方法3：遍历所有模块+主模块一次性全部挂 hook ──
 VOID WDebugerObject::AntiDetection_PatchIAT()
 {
-    DWORD64 GetProcBufBase = this->HookInformations.GetProcAddressHookAddress - 0x10;
+    DWORD64 GetProcBufBase =
+        this->HookInformations.GetProcAddressHookAddress - GETPROC_HOOK_ENTRY_OFFSET;
 
-   
-
-    // 遍历 dllhead 链表
     PDLLRecordNode tempnode = this->dllhead;
     while (tempnode != NULL)
     {
@@ -210,13 +491,10 @@ VOID WDebugerObject::AntiDetection_PatchIAT()
         tempnode = tempnode->next;
     }
 
-    // 主模块
     this->AntiDetection_PatchIAT_ByMainModule(GetProcBufBase);
-
 
     OutputDebugStringA("[PatchIAT] All IAT entries patched, AntiDetectionBits = TRUE\n");
 }
-
 VOID WDebugerObject::AntiDetection()
 {
     
@@ -246,208 +524,3 @@ VOID WDebugerObject::AntiDetection_Force()
 
     LeaveCriticalSection(&this->WdbgLock);
 }
-
-/*
-VOID WDebugerObject::AntiDetection()
-{
-    CHAR debugbuf[256];
-    UserAntiDetection(this->TargetPid, this->hDevice);
-
-    const std::string Ntdllstr = "ntdll.dll";
-    const std::string Kernel32str = "kernel32.dll";
-    const std::string NtQueryAPIstr = "NtQueryInformationProcess";
-    const std::string GetProcAPIstr = "GetProcAddress";
-
-    // ================================================================
-    // 1. 分配并注入 NtQueryInformationProcess Hook
-    // ================================================================
-    DWORD NtQueryFuncLen = (DWORD)((&NtQueryInformationProcessDebugHook_end)
-        - (&NtQueryInformationProcessDebugHook_begin));
-
-    LPVOID NtQueryHookAddress = VirtualAllocEx(this->ProcessHandle, NULL,
-        NtQueryFuncLen,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_EXECUTE_READWRITE);
-    if (NtQueryHookAddress == NULL)
-    {
-        sprintf_s(debugbuf, sizeof(debugbuf),
-            "[AntiDetection] VirtualAllocEx NtQuery failed, code=%d\n", GetLastError());
-        OutputDebugStringA(debugbuf);
-        return;
-    }
-
-    SIZE_T writesize = 0;
-    BYTE dummy = 0x90;
-    WriteProcessMemory(this->ProcessHandle, NtQueryHookAddress, &dummy, 1, &writesize);
-
-    UCHAR* NtQueryBuf = (UCHAR*)malloc(NtQueryFuncLen);
-    if (!NtQueryBuf) { VirtualFreeEx(this->ProcessHandle, NtQueryHookAddress, 0, MEM_RELEASE); return; }
-    memcpy(NtQueryBuf, &NtQueryInformationProcessDebugHook_begin, NtQueryFuncLen);
-    this->WritePhysicalMem(NtQueryBuf, NtQueryFuncLen, (DWORD64)NtQueryHookAddress);
-    FlushInstructionCache(this->ProcessHandle, NtQueryHookAddress, NtQueryFuncLen);
-    free(NtQueryBuf);
-
-    this->HookInformations.NtQueryInformationHookAddress = (DWORD64)NtQueryHookAddress;
-
-    // ================================================================
-    // 2. 先遍历 IAT 收集 GetProcAddress 原始地址
-    // ================================================================
-    DWORD64 OriginalGetProcAddr = 0;
-
-    // 从 dllhead 链表中找
-    PDLLRecordNode tempnode = this->dllhead;
-    while (tempnode != NULL && OriginalGetProcAddr == 0)
-    {
-        auto DllIt = tempnode->ImportDLLtable.find(Kernel32str);
-        if (DllIt != tempnode->ImportDLLtable.end())
-        {
-            auto APIIt = DllIt->second.ImportAPITable.find(GetProcAPIstr);
-            if (APIIt != DllIt->second.ImportAPITable.end())
-                OriginalGetProcAddr = APIIt->second.ImportAPIAddress;
-        }
-        tempnode = tempnode->next;
-    }
-
-    // 从主模块 IAT 兜底
-    if (OriginalGetProcAddr == 0)
-    {
-        auto MainDllIt = this->MainModuleImportDLLtable.find(Kernel32str);
-        if (MainDllIt != this->MainModuleImportDLLtable.end())
-        {
-            auto APIIt = MainDllIt->second.ImportAPITable.find(GetProcAPIstr);
-            if (APIIt != MainDllIt->second.ImportAPITable.end())
-                OriginalGetProcAddr = APIIt->second.ImportAPIAddress;
-        }
-    }
-
-    if (OriginalGetProcAddr == 0)
-    {
-        OutputDebugStringA("[AntiDetection] Cannot find GetProcAddress in IAT, abort\n");
-        VirtualFreeEx(this->ProcessHandle, NtQueryHookAddress, 0, MEM_RELEASE);
-        this->HookInformations.NtQueryInformationHookAddress = 0;
-        return;
-    }
-
-    // ================================================================
-    // 3. 分配并注入 GetProcAddress Hook
-    // ================================================================
-    DWORD GetProcFuncLen = (DWORD)((&GetProcAddressHook_end)
-        - (&GetProcAddressHook_begin));
-
-    LPVOID GetProcHookAddress = VirtualAllocEx(this->ProcessHandle, NULL,
-        GetProcFuncLen,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_EXECUTE_READWRITE);
-    if (GetProcHookAddress == NULL)
-    {
-        sprintf_s(debugbuf, sizeof(debugbuf),
-            "[AntiDetection] VirtualAllocEx GetProcAddress failed, code=%d\n", GetLastError());
-        OutputDebugStringA(debugbuf);
-        VirtualFreeEx(this->ProcessHandle, NtQueryHookAddress, 0, MEM_RELEASE);
-        this->HookInformations.NtQueryInformationHookAddress = 0;
-        return;
-    }
-
-    WriteProcessMemory(this->ProcessHandle, GetProcHookAddress, &dummy, 1, &writesize);
-
-    UCHAR* GetProcBuf = (UCHAR*)malloc(GetProcFuncLen);
-    if (!GetProcBuf)
-    {
-        VirtualFreeEx(this->ProcessHandle, NtQueryHookAddress, 0, MEM_RELEASE);
-        VirtualFreeEx(this->ProcessHandle, GetProcHookAddress, 0, MEM_RELEASE);
-        this->HookInformations.NtQueryInformationHookAddress = 0;
-        return;
-    }
-    memcpy(GetProcBuf, &GetProcAddressHook_begin, GetProcFuncLen);
-
-    // +0 : NtQueryInformationProcess Hook 地址（mov rax 返回值）
-    DWORD64 NtQueryHookAddr64 = (DWORD64)NtQueryHookAddress;
-    memcpy(GetProcBuf + 0x0, &NtQueryHookAddr64, sizeof(DWORD64));
-
-    // +8 : 原始 GetProcAddress 地址（从目标进程 IAT 取到的）
-    memcpy(GetProcBuf + 0x8, &OriginalGetProcAddr, sizeof(DWORD64));
-
-    this->WritePhysicalMem(GetProcBuf, GetProcFuncLen, (DWORD64)GetProcHookAddress);
-    FlushInstructionCache(this->ProcessHandle, GetProcHookAddress, GetProcFuncLen);
-    free(GetProcBuf);
-
-    this->HookInformations.GetProcAddressHookAddress = (DWORD64)GetProcHookAddress + 0x10; // 跳过数据区
-    this->HookInformations.GetProcAddressOriginalAddress = OriginalGetProcAddr;
-
-    // ================================================================
-    // 4. 修改 IAT 指针
-    // ================================================================
-    EnterCriticalSection(&this->WdbgLock);
-
-    // IAT 中 GetProcAddress 条目写入的地址是函数体起始，即 +16
-    DWORD64 GetProcIATValue = (DWORD64)GetProcHookAddress + 0x10;
-    DWORD64 NtQueryIATValue = (DWORD64)NtQueryHookAddress;
-
-    tempnode = this->dllhead;
-    while (tempnode != NULL)
-    {
-        // NtQueryInformationProcess hook
-        auto DllIt = tempnode->ImportDLLtable.find(Ntdllstr);
-        if (DllIt != tempnode->ImportDLLtable.end())
-        {
-            auto APIIt = DllIt->second.ImportAPITable.find(NtQueryAPIstr);
-            if (APIIt != DllIt->second.ImportAPITable.end())
-            {
-                auto& ainfor = APIIt->second;
-                if (this->HookInformations.NtQueryInformationOriginalAddress == 0)
-                    this->HookInformations.NtQueryInformationOriginalAddress = ainfor.ImportAPIAddress;
-                this->WritePhysicalMem((UCHAR*)&NtQueryIATValue, sizeof(DWORD64),
-                    ainfor.ImportAPITableEntryPtr);
-            }
-        }
-
-        // GetProcAddress hook
-        auto DllIt2 = tempnode->ImportDLLtable.find(Kernel32str);
-        if (DllIt2 != tempnode->ImportDLLtable.end())
-        {
-            auto APIIt2 = DllIt2->second.ImportAPITable.find(GetProcAPIstr);
-            if (APIIt2 != DllIt2->second.ImportAPITable.end())
-            {
-                auto& ainfor2 = APIIt2->second;
-                this->WritePhysicalMem((UCHAR*)&GetProcIATValue, sizeof(DWORD64),
-                    ainfor2.ImportAPITableEntryPtr);
-            }
-        }
-
-        tempnode = tempnode->next;
-    }
-
-    // 主模块 IAT
-    auto MainNtDllIt = this->MainModuleImportDLLtable.find(Ntdllstr);
-    if (MainNtDllIt != this->MainModuleImportDLLtable.end())
-    {
-        auto APIIt = MainNtDllIt->second.ImportAPITable.find(NtQueryAPIstr);
-        if (APIIt != MainNtDllIt->second.ImportAPITable.end())
-        {
-            auto& ainfor = APIIt->second;
-            if (this->HookInformations.NtQueryInformationOriginalAddress == 0)
-                this->HookInformations.NtQueryInformationOriginalAddress = ainfor.ImportAPIAddress;
-            this->WritePhysicalMem((UCHAR*)&NtQueryIATValue, sizeof(DWORD64),
-                ainfor.ImportAPITableEntryPtr);
-        }
-    }
-
-    auto MainK32It = this->MainModuleImportDLLtable.find(Kernel32str);
-    if (MainK32It != this->MainModuleImportDLLtable.end())
-    {
-        auto APIIt2 = MainK32It->second.ImportAPITable.find(GetProcAPIstr);
-        if (APIIt2 != MainK32It->second.ImportAPITable.end())
-        {
-            this->WritePhysicalMem((UCHAR*)&GetProcIATValue, sizeof(DWORD64),
-                APIIt2->second.ImportAPITableEntryPtr);
-        }
-    }
-
-    // 两个 Hook 全部完成
-    this->AntiDetectionBits = TRUE;
-    LeaveCriticalSection(&this->WdbgLock);
-
-    OutputDebugStringA("[AntiDetection] All hooks applied, AntiDetectionBits = TRUE\n");
-}
-
-*/

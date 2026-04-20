@@ -250,3 +250,78 @@ DWORD64 WDebugerObject::GetImportAPIAddressPtrByName(WCHAR* SpaceDllName, CHAR* 
 }
 
 
+
+BOOL WDebugerObject::GetImportTable(__in  DWORD64         ModuleBase,
+	__out PImportEntryFlat OutBuffer,
+	__in  DWORD            BufferCount,
+	__out DWORD* OutCount)
+{
+	if (OutCount == NULL)
+	{
+		return FALSE;
+	}
+	*OutCount = 0;
+
+	EnterCriticalSection(&(this->WdbgLock));
+
+	std::unordered_map<std::string, ImportModuleInfo>* pTable = NULL;
+
+	
+	if (reinterpret_cast<DWORD64>(this->ProcessInfo.lpBaseOfImage) == ModuleBase)
+	{
+		pTable = &(this->MainModuleImportDLLtable);
+	}
+	else
+	{
+		
+		PDLLRecordNode cur = this->dllhead;
+		while (cur != NULL)
+		{
+			if (reinterpret_cast<DWORD64>(cur->dllinfo.lpBaseOfDll) == ModuleBase)
+			{
+				pTable = &(cur->ImportDLLtable);
+				break;
+			}
+			cur = cur->next;
+		}
+	}
+
+	if (pTable == NULL || pTable->empty())
+	{
+		LeaveCriticalSection(&(this->WdbgLock));
+		return TRUE;   
+	}
+
+
+	for (auto& dllEntry : *pTable)
+	{
+		const std::string& dllName = dllEntry.first;
+
+		for (auto& apiEntry : dllEntry.second.ImportAPITable)
+		{
+			const std::string& apiName = apiEntry.first;
+			const ImportAPIinfo& info = apiEntry.second;
+
+			if (OutBuffer != NULL && *OutCount < BufferCount)
+			{
+				PImportEntryFlat slot = &OutBuffer[*OutCount];
+				ZeroMemory(slot, sizeof(ImportEntryFlat));
+
+				strncpy_s(slot->APIName, IMPORT_NAME_MAX,
+					apiName.c_str(), _TRUNCATE);
+
+				strncpy_s(slot->FromDLL, IMPORT_DLL_MAX,
+					dllName.c_str(), _TRUNCATE);
+
+				slot->IATAddress = info.ImportAPITableEntryPtr;
+				slot->FuncAddress = info.ImportAPIAddress;
+			}
+
+			(*OutCount)++;  
+		}
+	}
+
+	LeaveCriticalSection(&(this->WdbgLock));
+	return TRUE;
+}
+

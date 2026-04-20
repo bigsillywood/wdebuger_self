@@ -53,4 +53,20 @@ extern "C" UCHAR NtQueryInformationProcessDebugHook_begin;
 extern "C" UCHAR NtQueryInformationProcessDebugHook_end;
 extern "C" UCHAR GetProcAddressHook_begin;
 extern "C" UCHAR GetProcAddressHook_end;
+extern "C" UCHAR OutputDebugStringHook_begin;
+extern "C" UCHAR OutputDebugStringhook_end;
+extern "C" UCHAR NtSetInformationThreadHook_begin;
+extern "C" UCHAR NtSetInformationThreadHook_end;
+
 BOOL WaitForDebugEventSelf(DEBUG_EVENT* PDebugEvent, INT waitmiliseconds);
+#define NTQUERY_HOOK_ENTRY_OFFSET                    0x00
+#define OUTPUTDEBUGSTRING_HOOK_ENTRY_OFFSET          0x00
+
+#define NTSETINFO_HOOK_ORIGINAL_OFFSET               0x00
+#define NTSETINFO_HOOK_ENTRY_OFFSET                  0x08
+
+#define GETPROC_HOOK_NTQUERY_RET_OFFSET              0x00
+#define GETPROC_HOOK_NTSETINFO_RET_OFFSET            0x08
+#define GETPROC_HOOK_OUTPUTDEBUG_RET_OFFSET          0x10
+#define GETPROC_HOOK_ORIGINAL_OFFSET                 0x18
+#define GETPROC_HOOK_ENTRY_OFFSET                    0x20
